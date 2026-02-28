@@ -1,0 +1,160 @@
+import { useState, useEffect } from 'react'
+import { cn } from '../lib/utils'
+
+const INTERVAL_PRESETS = [
+  { label: '1 min', value: 60 },
+  { label: '5 min', value: 300 },
+  { label: '15 min', value: 900 },
+  { label: '1 hour', value: 3600 },
+  { label: '1 day', value: 86400 },
+]
+
+const DEFAULT_CAPABILITIES = [
+  { id: 'realtime_monitoring', label: 'Real-time Monitoring', weight: 20, enabled: true },
+  { id: 'root_cause_analysis', label: 'Root Cause Analysis', weight: 25, enabled: true },
+  { id: 'next_best_action_report', label: 'Next Best Action Report', weight: 25, enabled: true },
+  { id: 'equipment_health', label: 'Equipment Health', weight: 10, enabled: true },
+  { id: 'compliance_monitoring', label: 'Compliance Monitoring', weight: 10, enabled: true },
+  { id: 'strategy_optimization', label: 'Strategy Optimization', weight: 5, enabled: true },
+  { id: 'learning_reflection', label: 'Learning Reflection', weight: 5, enabled: true },
+]
+
+export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
+  const [interval, setInterval] = useState(autonomousStatus?.interval_seconds || 60)
+  const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (autonomousStatus?.interval_seconds) {
+      setInterval(autonomousStatus.interval_seconds)
+    }
+    if (autonomousStatus?.capabilities) {
+      setCapabilities(autonomousStatus.capabilities)
+    }
+  }, [autonomousStatus])
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await fetch('/api/autonomous/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interval_seconds: interval,
+          capabilities: capabilities,
+        }),
+      })
+      onSave?.()
+      onClose()
+    } catch (err) {
+      console.error('Failed to save settings:', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggleCapability = (id) => {
+    setCapabilities(prev => prev.map(c => 
+      c.id === id ? { ...c, enabled: !c.enabled } : c
+    ))
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm" onClick={onClose} />
+      
+      <div className="relative w-full max-w-lg bg-slate-800 border border-slate-700/50 rounded-2xl shadow-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-warm-white">Autonomous Mode Settings</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-warm-white transition-colors">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        
+        <div className="px-6 py-5 space-y-6 max-h-[70vh] overflow-y-auto">
+          {/* Interval Selection */}
+          <div>
+            <label className="text-sm text-slate-400 mb-3 block">Run autonomous analysis every:</label>
+            <div className="flex flex-wrap gap-2">
+              {INTERVAL_PRESETS.map(preset => (
+                <button
+                  key={preset.value}
+                  onClick={() => setInterval(preset.value)}
+                  className={cn(
+                    "px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                    interval === preset.value
+                      ? "bg-amber-500 text-slate-900"
+                      : "bg-slate-700/50 text-slate-300 hover:bg-slate-700"
+                  )}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Capabilities */}
+          <div>
+            <label className="text-sm text-slate-400 mb-3 block">Focus areas (weighted selection):</label>
+            <div className="space-y-2">
+              {capabilities.map(cap => (
+                <div 
+                  key={cap.id}
+                  className={cn(
+                    "flex items-center justify-between p-3 rounded-lg transition-all",
+                    cap.enabled ? "bg-slate-700/40" : "bg-slate-800/40 opacity-60"
+                  )}
+                >
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => toggleCapability(cap.id)}
+                      className={cn(
+                        "w-5 h-5 rounded border-2 flex items-center justify-center transition-all",
+                        cap.enabled 
+                          ? "bg-amber-500 border-amber-500" 
+                          : "border-slate-500"
+                      )}
+                    >
+                      {cap.enabled && (
+                        <svg className="w-3 h-3 text-slate-900" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </button>
+                    <span className={cn(
+                      "text-sm",
+                      cap.enabled ? "text-warm-white" : "text-slate-500"
+                    )}>
+                      {cap.label}
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-500">{cap.weight}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        
+        <div className="px-6 py-4 border-t border-slate-700/50 flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-slate-400 hover:text-warm-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-5 py-2 bg-amber-500 text-slate-900 rounded-lg font-medium 
+                     hover:bg-amber-400 transition-all disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+

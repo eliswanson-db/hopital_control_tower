@@ -1,0 +1,33 @@
+# Databricks App Configuration
+command:
+  - sh
+  - -c
+  - pip install -r requirements.txt && npm install && npm run build && gunicorn --bind 0.0.0.0:8000 --workers 2 --timeout 600 api_server:app
+
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "3abb59fcfb739e0d"
+
+  - name: CATALOG
+    value: "eswanson_demo"
+
+  - name: SCHEMA
+    value: "med_logistics_nba"
+
+  - name: VECTOR_SEARCH_ENDPOINT
+    value: "eswanson_demo_med_logistics_nba_vector_endpoint"
+
+  - name: LLM_MODEL_ORCHESTRATOR
+    value: "databricks-claude-sonnet-4-5"
+
+  - name: LLM_MODEL_RAG
+    value: "databricks-claude-sonnet-4-5"
+
+  - name: AUTONOMOUS_INTERVAL_SECONDS
+    value: "3600"
+
+  - name: AUTO_START_AUTONOMOUS
+    value: "false"
+
+  - name: MLFLOW_EXPERIMENT
+    value: "/Shared/med-logistics-nba-agent"

@@ -1,0 +1,30 @@
+bundle:
+  name: medical_logistics_nba_app
+  databricks_cli_version: ">=0.234.*"
+
+include:
+  - variables.yml
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fe-vm-vdm-classic-q6xfh3.cloud.databricks.com/
+    variables:
+      catalog: eswanson_demo
+      schema: med_logistics_nba
+      warehouse_id: 3abb59fcfb739e0d # Update with your warehouse ID
+      node_type_id: i3.xlarge
+
+  prod:
+    mode: production
+    workspace:
+      host: ${var.workspace_host}
+      root_path: ${var.root_path}
+    permissions:
+      - user_name: ${var.deploying_user}
+        level: CAN_MANAGE
+    run_as:
+      user_name: ${var.deploying_user}
