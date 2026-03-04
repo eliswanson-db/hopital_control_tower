@@ -1,49 +1,31 @@
-"""Agent tools for SQL execution, vector search, and medical logistics analysis."""
-import os
+"""Agent tools for SQL execution, vector search, and hospital operations analysis."""
 import json
 import uuid
 import logging
 from datetime import datetime
 from typing import Optional
 from langchain_core.tools import tool
-from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import Format, Disposition
+
+from .config import (
+    WAREHOUSE_ID, VECTOR_ENDPOINT, VECTOR_INDEX, SOP_VECTOR_INDEX,
+    ENCOUNTERS_TABLE, DRUG_COSTS_TABLE, STAFFING_TABLE,
+    ED_WAIT_TABLE, KPI_TABLE, ANALYSIS_TABLE,
+    get_workspace_client,
+)
 
 logger = logging.getLogger(__name__)
 
-_workspace_client: Optional[WorkspaceClient] = None
-
-
-def get_workspace_client() -> WorkspaceClient:
-    global _workspace_client
-    if _workspace_client is None:
-        _workspace_client = WorkspaceClient()
-    return _workspace_client
-
-
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
-SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
-WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-VECTOR_ENDPOINT = os.environ.get("VECTOR_SEARCH_ENDPOINT", f"{CATALOG}_{SCHEMA}_vector_endpoint")
-VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.encounters_vector_index"
-SOP_VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.sop_vector_index"
-
-# Table names
-ENCOUNTERS_TABLE = f"{CATALOG}.{SCHEMA}.dim_encounters"
-DRUG_COSTS_TABLE = f"{CATALOG}.{SCHEMA}.fact_drug_costs"
-STAFFING_TABLE = f"{CATALOG}.{SCHEMA}.fact_staffing"
-ED_WAIT_TABLE = f"{CATALOG}.{SCHEMA}.fact_ed_wait_times"
-KPI_TABLE = f"{CATALOG}.{SCHEMA}.fact_operational_kpis"
-HOSPITAL_OVERVIEW_TABLE = f"{CATALOG}.{SCHEMA}.hospital_overview"  # VIEW
-ANALYSIS_TABLE = f"{CATALOG}.{SCHEMA}.analysis_outputs"
-
 
 def _execute_query(query: str, wait_timeout: str = "30s") -> dict:
-    """Execute a SQL query and return results."""
+    """Execute a SQL query and return results. Forces JSON_ARRAY format."""
     w = get_workspace_client()
     result = w.statement_execution.execute_statement(
         warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout=wait_timeout,
+        format=Format.JSON_ARRAY, disposition=Disposition.INLINE,
     )
-    if result.status.state.value == "SUCCEEDED":
+    state = result.status.state.value if result.status and result.status.state else "UNKNOWN"
+    if state in ("SUCCEEDED", "CLOSED"):
         if result.result and result.result.data_array:
             columns = [col.name for col in result.manifest.schema.columns]
             rows = [dict(zip(columns, row)) for row in result.result.data_array]
@@ -55,7 +37,7 @@ def _execute_query(query: str, wait_timeout: str = "30s") -> dict:
 
 @tool
 def execute_sql(query: str) -> str:
-    """Execute read-only SQL query against medical logistics data.
+    """Execute read-only SQL query against hospital operations data.
 
     Available tables:
     - dim_encounters: Patient encounters (encounter_id, patient_id, hospital, department, admit_date, discharge_date, los_days, discharge_day_of_week, payer, drg_code, attending_physician, is_readmission)

@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
-import ContextCard from './ContextCard'
 import { cn } from '../lib/utils'
 
 function LoadingDots({ stage }) {
@@ -26,7 +25,67 @@ function LoadingDots({ stage }) {
   )
 }
 
-function Message({ message, isUser }) {
+const INTENT_DESCRIPTIONS = {
+  query: 'Data lookup detected -- allocated SQL tool only for fast response',
+  search: 'Search request detected -- allocated vector search for semantic matching',
+  analyze: 'Analysis request detected -- allocated full tool suite (SQL, search, SOPs, write)',
+  general: 'General question -- allocated SQL + vector search as default tools',
+}
+
+function AgentReasoning({ intent, toolCalls }) {
+  const [open, setOpen] = useState(false)
+  if (!intent) return null
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOpen(!open)}
+        className="text-xs text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1">
+        <span className="font-mono">{open ? '\u25B4' : '\u25BE'}</span>
+        {open ? 'Hide' : 'Show'} agent reasoning
+      </button>
+      {open && (
+        <div className="mt-1.5 px-3 py-2 bg-slate-900/60 border border-slate-700/20 rounded-lg text-xs text-slate-400 space-y-1">
+          <div><span className="text-slate-500">Intent:</span> <span className="font-mono text-teal-400">{intent}</span>
+            {toolCalls?.length > 0 && <> <span className="text-slate-600">-&gt;</span> Tools: <span className="font-mono text-slate-300">{toolCalls.join(', ')}</span></>}
+          </div>
+          <div className="text-slate-500">{INTENT_DESCRIPTIONS[intent] || ''}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const AGENT_LABELS = { supervisor: 'Supervisor', planner: 'Planner', retrieval: 'Retrieval', analyst: 'Analyst', respond: 'Respond', clarify: 'Clarify', system: 'System' }
+
+function AgentPipeline({ trace }) {
+  const [open, setOpen] = useState(false)
+  if (!trace || trace.length === 0) return null
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOpen(!open)}
+        className="text-xs text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1">
+        <span className="font-mono">{open ? '\u25B4' : '\u25BE'}</span>
+        {open ? 'Hide' : 'Show'} agent pipeline ({trace.length} steps)
+      </button>
+      {open && (
+        <div className="mt-1.5 px-3 py-2 bg-slate-900/60 border border-slate-700/20 rounded-lg text-xs space-y-0.5">
+          {trace.map((step, i) => (
+            <div key={i} className="flex items-baseline gap-2 text-slate-400">
+              <span className="text-slate-600 w-4 text-right flex-shrink-0">{i + 1}.</span>
+              <span className="font-mono text-teal-400 flex-shrink-0">{AGENT_LABELS[step.agent] || step.agent}</span>
+              <span className="text-slate-600">-&gt;</span>
+              <span className="text-slate-300 truncate">{step.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const isErrorMessage = (content) =>
+  content?.startsWith('I encountered an error') || content?.startsWith('Deep analysis error')
+
+function Message({ message, isUser, onRetry }) {
   return (
     <div className={cn("message-enter max-w-4xl", isUser ? "ml-auto" : "")}>
       <div className={cn(
@@ -42,18 +101,13 @@ function Message({ message, isUser }) {
             <ReactMarkdown>{message.content}</ReactMarkdown>
           </div>
         )}
-        
-        {message.card && (
-          <div className="mt-4">
-            <ContextCard {...message.card} />
-          </div>
+
+        {!isUser && isErrorMessage(message.content) && onRetry && (
+          <button onClick={onRetry}
+            className="mt-3 px-4 py-1.5 text-sm bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg hover:bg-amber-500/30 transition-all">
+            Retry
+          </button>
         )}
-        
-        {message.cards && message.cards.map((card, i) => (
-          <div key={i} className="mt-4">
-            <ContextCard {...card} />
-          </div>
-        ))}
         
         {message.suggestions && (
           <div className="mt-4 flex flex-wrap gap-2">
@@ -72,6 +126,14 @@ function Message({ message, isUser }) {
               <span key={i} className="text-xs px-2 py-1 bg-teal-500/20 text-teal-300 rounded-md">{tool}</span>
             ))}
           </div>
+        )}
+
+        {!isUser && message.intent && (
+          <AgentReasoning intent={message.intent} toolCalls={message.tool_calls} />
+        )}
+
+        {!isUser && message.routing_trace && (
+          <AgentPipeline trace={message.routing_trace} />
         )}
       </div>
     </div>
@@ -148,42 +210,41 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
     }
   }, [pendingQuery])
 
-  const sendDeepStream = async (text, history) => {
-    const res = await fetch('/api/agent/chat', {
+  const sendDeepAnalysis = async (text, history) => {
+    const submitRes = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, mode: 'rag', history, stream: true }),
     })
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const event = JSON.parse(line.slice(6))
-        if (event.stage === 'done') {
-          setLoadingStage(null)
-          const assistantMessage = {
-            role: 'assistant', content: event.response || 'No response',
-            tool_calls: event.tool_calls || [],
-          }
-          setMessages(prev => [...prev, assistantMessage])
-          if (event.tool_calls?.includes('write_analysis')) onRefresh?.()
-          return
-        }
-        if (event.stage === 'error') {
-          setLoadingStage(null)
-          setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${event.message}` }])
-          return
-        }
-        setLoadingStage(event.stage)
-      }
+    const { task_id, error } = await submitRes.json()
+    if (error || !task_id) {
+      setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${error || 'No task ID returned'}` }])
+      return
     }
+    setLoadingStage('starting')
+    for (let i = 0; i < 150; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const pollRes = await fetch(`/api/agent/task/${task_id}`)
+      const task = await pollRes.json()
+      if (task.status === 'done') {
+        setLoadingStage(null)
+        setMessages(prev => [...prev, {
+          role: 'assistant', content: task.response || 'No response',
+          tool_calls: task.tool_calls || [],
+          routing_trace: task.routing_trace || null,
+        }])
+        if (task.tool_calls?.includes('write_analysis')) onRefresh?.()
+        return
+      }
+      if (task.status === 'error') {
+        setLoadingStage(null)
+        setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${task.error}` }])
+        return
+      }
+      if (task.stage) setLoadingStage(task.stage)
+    }
+    setLoadingStage(null)
+    setMessages(prev => [...prev, { role: 'assistant', content: 'Deep analysis timed out after 5 minutes.' }])
   }
 
   const sendMessage = async (messageText) => {
@@ -197,7 +258,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
     try {
       const history = messages.map(m => ({ role: m.role, content: m.content }))
       if (mode !== 'quick') {
-        await sendDeepStream(text, history)
+        await sendDeepAnalysis(text, history)
       } else {
         const res = await fetch('/api/agent/chat', {
           method: 'POST',
@@ -207,7 +268,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
         const data = await res.json()
         const assistantMessage = {
           role: 'assistant', content: data.response || data.error || 'No response',
-          tool_calls: data.tool_calls || [], card: data.card, cards: data.cards,
+          tool_calls: data.tool_calls || [], intent: data.intent || null,
         }
         setMessages(prev => [...prev, assistantMessage])
         if (data.tool_calls?.includes('write_analysis')) onRefresh?.()
@@ -224,22 +285,32 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
   }
 
-  const suggestions = [
-    { label: "Why did drug costs spike in November?", onClick: () => sendMessage("Why did drug costs spike in November for Hospital A?") },
-    { label: "How to reduce LOS?", onClick: () => sendMessage("What specific actions can I take to reduce length of stay in Hospital A?") },
-    { label: "Monday discharge patterns", onClick: () => sendMessage("Why is LOS higher for patients discharged on Mondays?") },
-    { label: "Reduce ED wait times", onClick: () => sendMessage("How can I reduce wait times in the Emergency Department?") },
-    { label: "Contract labor in Cardiology", onClick: () => sendMessage("How can I lower the use of contract labor in the cardiology department?") },
-  ]
+  const [suggestions, setSuggestions] = useState([])
+
+  useEffect(() => {
+    fetch('/api/suggestions').then(r => r.json()).then(data => {
+      setSuggestions((data.suggestions || []).map(s => ({
+        label: s.label,
+        full: s.query,
+        onClick: () => sendMessage(s.query),
+      })))
+    }).catch(() => {})
+  }, [healthScore])
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-6 py-8">
         <div className="max-w-5xl mx-auto space-y-6">
           <WelcomeMessage healthScore={healthScore} />
-          {messages.map((msg, idx) => (
-            <Message key={idx} message={msg} isUser={msg.role === 'user'} />
-          ))}
+          {messages.map((msg, idx) => {
+            const retryHandler = (msg.role === 'assistant' && isErrorMessage(msg.content) && !isLoading)
+              ? () => {
+                  const lastUserMsg = [...messages].slice(0, idx).reverse().find(m => m.role === 'user')
+                  if (lastUserMsg) sendMessage(lastUserMsg.content)
+                }
+              : null
+            return <Message key={idx} message={msg} isUser={msg.role === 'user'} onRetry={retryHandler} />
+          })}
           {isLoading && (
             <div className="max-w-4xl">
               <div className="bg-slate-800/40 border border-slate-700/30 rounded-2xl px-5 py-4">
@@ -256,7 +327,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
           {messages.length === 0 && (
             <div className="flex flex-wrap gap-2 mb-4">
               {suggestions.map((s, i) => (
-                <button key={i} onClick={s.onClick}
+                <button key={i} onClick={s.onClick} title={s.full}
                   className="px-4 py-2 text-sm bg-slate-800/60 text-slate-300 rounded-xl border border-slate-700/40 hover:bg-slate-700/60 hover:text-white hover:border-teal-500/30 transition-all">
                   {s.label}
                 </button>

@@ -1,4 +1,4 @@
-"""Agent module for Medical Logistics NBA app."""
+"""Agent module for Hospital Control Tower."""
 from .graph import invoke_agent, get_llm
 from .autonomous import (
     get_autonomous,

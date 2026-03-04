@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Setup Tables for Medical Logistics NBA App
+# MAGIC # Setup Tables for Hospital Control Tower
 # MAGIC
 # MAGIC Creates the analysis_outputs and poetry tables in Unity Catalog.
 
@@ -30,12 +30,17 @@ spark.sql(
 CREATE TABLE IF NOT EXISTS {SCHEMA}.analysis_outputs (
     id STRING COMMENT 'Unique analysis ID (UUID)',
     encounter_id STRING COMMENT 'Related encounter ID if applicable',
-    analysis_type STRING NOT NULL COMMENT 'Type: readmission_prediction, root_cause_analysis, cost_optimization, etc.',
-    insights STRING NOT NULL COMMENT 'Main analysis findings',
+    analysis_type STRING COMMENT 'Type: readmission_prediction, root_cause_analysis, cost_optimization, etc.',
+    insights STRING COMMENT 'Main analysis findings',
     recommendations STRING COMMENT 'Actionable recommendations',
     created_at TIMESTAMP COMMENT 'When analysis was created',
-    agent_mode STRING NOT NULL COMMENT 'quick or deep',
-    metadata MAP<STRING, STRING> COMMENT 'Additional metadata'
+    agent_mode STRING COMMENT 'quick or deep',
+    metadata MAP<STRING, STRING> COMMENT 'Additional metadata',
+    priority STRING COMMENT 'critical/high/medium/low',
+    status STRING COMMENT 'pending/approved/rejected',
+    reviewed_by STRING COMMENT 'Who reviewed',
+    reviewed_at TIMESTAMP COMMENT 'When reviewed',
+    engineer_notes STRING COMMENT 'Reviewer notes'
 )
 USING DELTA
 COMMENT 'Agent analysis outputs for medical logistics next best action'

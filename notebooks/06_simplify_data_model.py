@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Setup Data Model for Medical Logistics NBA App
+# MAGIC # Setup Data Model for Hospital Control Tower
 # MAGIC
 # MAGIC Creates the medical logistics data model tables and hospital_overview VIEW.
 # MAGIC

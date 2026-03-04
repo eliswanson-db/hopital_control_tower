@@ -10,26 +10,28 @@ const INTERVAL_PRESETS = [
 ]
 
 const DEFAULT_CAPABILITIES = [
-  { id: 'realtime_monitoring', label: 'Real-time Monitoring', weight: 20, enabled: true },
-  { id: 'root_cause_analysis', label: 'Root Cause Analysis', weight: 25, enabled: true },
-  { id: 'next_best_action_report', label: 'Next Best Action Report', weight: 25, enabled: true },
-  { id: 'equipment_health', label: 'Equipment Health', weight: 10, enabled: true },
-  { id: 'compliance_monitoring', label: 'Compliance Monitoring', weight: 10, enabled: true },
-  { id: 'strategy_optimization', label: 'Strategy Optimization', weight: 5, enabled: true },
-  { id: 'learning_reflection', label: 'Learning Reflection', weight: 5, enabled: true },
+  { id: 'los_analysis', label: 'Length of Stay Analysis', enabled: true },
+  { id: 'cost_monitoring', label: 'Drug Cost Monitoring', enabled: true },
+  { id: 'next_best_action_report', label: 'Recommended Actions Report', enabled: true },
+  { id: 'ed_performance', label: 'ED Performance', enabled: true },
+  { id: 'staffing_analysis', label: 'Staffing Optimization', enabled: true },
+  { id: 'compliance_monitoring', label: 'Compliance Monitoring', enabled: true },
 ]
 
 export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
-  const [interval, setInterval] = useState(autonomousStatus?.interval_seconds || 60)
+  const [intervalSec, setIntervalSec] = useState(autonomousStatus?.interval_seconds || 3600)
   const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (autonomousStatus?.interval_seconds) {
-      setInterval(autonomousStatus.interval_seconds)
+      setIntervalSec(autonomousStatus.interval_seconds)
     }
     if (autonomousStatus?.capabilities) {
-      setCapabilities(autonomousStatus.capabilities)
+      setCapabilities(DEFAULT_CAPABILITIES.map(dc => {
+        const remote = autonomousStatus.capabilities.find(c => c.id === dc.id)
+        return remote ? { ...dc, enabled: remote.enabled } : dc
+      }))
     }
   }, [autonomousStatus])
 
@@ -40,7 +42,7 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          interval_seconds: interval,
+          interval_seconds: intervalSec,
           capabilities: capabilities,
         }),
       })
@@ -81,10 +83,10 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
               {INTERVAL_PRESETS.map(preset => (
                 <button
                   key={preset.value}
-                  onClick={() => setInterval(preset.value)}
+                  onClick={() => setIntervalSec(preset.value)}
                   className={cn(
                     "px-4 py-2 rounded-lg text-sm font-medium transition-all",
-                    interval === preset.value
+                    intervalSec === preset.value
                       ? "bg-amber-500 text-slate-900"
                       : "bg-slate-700/50 text-slate-300 hover:bg-slate-700"
                   )}
@@ -97,7 +99,7 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
 
           {/* Capabilities */}
           <div>
-            <label className="text-sm text-slate-400 mb-3 block">Focus areas (weighted selection):</label>
+            <label className="text-sm text-slate-400 mb-3 block">Focus areas:</label>
             <div className="space-y-2">
               {capabilities.map(cap => (
                 <div 
@@ -130,7 +132,7 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
                       {cap.label}
                     </span>
                   </div>
-                  <span className="text-xs text-slate-500">{cap.weight}%</span>
+                  <span className="text-xs text-slate-500">{cap.enabled ? 'On' : 'Off'}</span>
                 </div>
               ))}
             </div>

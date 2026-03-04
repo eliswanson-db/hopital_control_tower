@@ -1,7 +1,7 @@
 resources:
   jobs:
     setup_lakebase:
-      name: "${bundle.target}-med-logistics-nba-setup-lakebase"
+      name: "${bundle.target}-hospital-control-tower-setup-lakebase"
       description: "Setup Lakebase instance and analysis_outputs table"
       tasks:
         - task_key: setup_lakebase
@@ -22,7 +22,7 @@ resources:
               ResourceClass: SingleNode
 
     setup_vector_search:
-      name: "${bundle.target}-med-logistics-nba-setup-vector-search"
+      name: "${bundle.target}-hospital-control-tower-setup-vector-search"
       description: "Setup Vector Search index for encounter data"
       tasks:
         - task_key: setup_vector_search
@@ -43,16 +43,19 @@ resources:
               ResourceClass: SingleNode
 
     grant_permissions:
-      name: "${bundle.target}-med-logistics-nba-grant-permissions"
+      name: "${bundle.target}-hospital-control-tower-grant-permissions"
       description: "Grant permissions to app service principal"
       tasks:
         - task_key: grant_permissions
+          libraries:
+            - pypi:
+                package: "databricks-sdk>=0.90.0"
           notebook_task:
             notebook_path: ../notebooks/03_grant_permissions.py
             base_parameters:
               "var.catalog": ${var.catalog}
               "var.schema": ${var.schema}
-              "var.app_name": "${bundle.target}-med-logistics-nba"
+              "var.app_name": "${bundle.target}-hospital-control-tower"
               "var.service_principal_id": ""
               "var.service_principal_name": ""
           new_cluster:
@@ -67,7 +70,7 @@ resources:
               ResourceClass: SingleNode
 
     diagnostic_check:
-      name: "${bundle.target}-med-logistics-nba-diagnostic"
+      name: "${bundle.target}-hospital-control-tower-diagnostic"
       description: "Run diagnostic checks for app prerequisites"
       tasks:
         - task_key: diagnostic_check
@@ -85,7 +88,7 @@ resources:
               ResourceClass: SingleNode
 
     setup_sop_vector_search:
-      name: "${bundle.target}-med-logistics-nba-setup-sop-vector"
+      name: "${bundle.target}-hospital-control-tower-setup-sop-vector"
       description: "Setup SOP/policy PDF parsing and vector search index"
       tasks:
         - task_key: setup_sop_vector_search
@@ -106,8 +109,8 @@ resources:
               ResourceClass: SingleNode
 
     setup_data_model:
-      name: "${bundle.target}-med-logistics-nba-setup-data-model"
-      description: "Setup medical logistics data model tables"
+      name: "${bundle.target}-hospital-control-tower-setup-data-model"
+      description: "Setup hospital operations data model tables"
       tasks:
         - task_key: setup_data_model
           notebook_task:
@@ -127,7 +130,7 @@ resources:
               ResourceClass: SingleNode
 
     generate_data:
-      name: "${bundle.target}-med-logistics-nba-generate-data"
+      name: "${bundle.target}-hospital-control-tower-generate-data"
       description: "Generate realistic hospital operations data for testing and demos"
       tasks:
         - task_key: generate_data
@@ -150,7 +153,7 @@ resources:
               ResourceClass: SingleNode
 
     daily_data_refresh:
-      name: "${bundle.target}-med-logistics-nba-daily-data"
+      name: "${bundle.target}-hospital-control-tower-daily-data"
       description: "Daily append of fresh encounter data to keep demo tables current"
       schedule:
         quartz_cron_expression: "0 0 6 * * ?"

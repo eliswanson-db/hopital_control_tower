@@ -1,50 +1,117 @@
-# MedOps NBA - Next Best Action for Medical Logistics
+# Hospital Control Tower
 
-An intelligent companion for hospital operations that feels like a wise colleague, not a dashboard.
+AI-powered operations intelligence for hospital logistics on Databricks.
+
+> **Disclaimer**: This is a Databricks Solution Accelerator -- a starting point to accelerate your project. Hospital Control Tower is fully functioning end-to-end, but you should evaluate, test, and modify this code for your specific use case. Agent recommendations and analytics will vary depending on your data and configuration.
+
+## What This Is
+
+A deployable Databricks App that gives hospital operations teams a conversational AI companion. Ask questions about encounters, drug costs, ED wait times, and staffing -- the agent queries your data, searches Standard Operating Procedures, and recommends actions grounded in your SOPs.
+
+The app shows:
+- A **real-time dashboard** with composite health score, encounter trends, alerts, and operational metrics
+- A **chat interface** with two modes: Quick Query (2-5s lookups) and Deep Analysis (30-90s multi-agent investigations)
+- **Autonomous monitoring** that detects health issues and generates recommended action reports in the background
+
+**Example questions the agent can answer:**
+- Why did drug costs spike in November for Hospital A?
+- What specific actions can I take to reduce LOS in Hospital A?
+- Why is LOS higher for patients discharged on Mondays?
+- How can I reduce wait times in the Emergency Department?
+- How can I lower the use of contract labor in the cardiology department?
+
+## Quickstart
+
+### Option 1: One-Command Setup (Recommended)
+
+1. **Configure variables**:
+
+   Edit `variables.yml` with your catalog, schema, and warehouse ID. Update the `workspace.host` in `databricks.yml` for your workspace.
+
+   ```yaml
+   # variables.yml
+   catalog:
+     default: "your_catalog"
+   schema:
+     default: "med_logistics_nba"
+   warehouse_id:
+     default: "your_warehouse_id"
+   ```
+
+2. **Run setup**:
+   ```bash
+   ./setup.sh dev
+   ```
+   This syncs `app/app.yaml` from `variables.yml`, deploys the bundle, generates data, grants permissions, sets up vector search and SOPs, and runs diagnostics.
+
+   To redeploy without regenerating data:
+   ```bash
+   ./setup.sh dev --skip-data
+   ```
+
+3. **Access**: Open your Databricks workspace > **Apps** > `dev-hospital-control-tower`.
+
+### Option 2: Git Folder (No CLI)
+
+1. Clone this repository into a Databricks Git Folder
+2. Run notebooks in order: `00_generate_data.py` -> `02_setup_vector_search.py` -> `03_grant_permissions.py` -> `05_setup_sop_vector_search.py`
+3. Deploy the app from the Databricks Apps UI, pointing to `app/` with `app.yaml` as the configuration
+
+## Prerequisites
+
+| Tool | Minimum Version | Purpose |
+|------|----------------|---------|
+| [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) | >= 0.234.0 | Bundle deployment and job management |
+| [Node.js / npm](https://nodejs.org/) | >= 18 | Frontend build (React + Vite) |
+| Python | >= 3.10 | Backend and notebooks |
+| [jq](https://jqlang.github.io/jq/) | any (optional) | Reliable JSON parsing in `deploy.sh` |
+
+You also need:
+- A **Databricks workspace** with Unity Catalog enabled
+- A **SQL Warehouse** -- set the ID in `variables.yml` (`warehouse_id`)
+- A **Vector Search endpoint** -- created automatically by `02_setup_vector_search.py`, or provide an existing one in `variables.yml`
+- (Optional) A **Lakebase instance** for transactional storage -- see [`docs/LAKEBASE_SETUP.md`](docs/LAKEBASE_SETUP.md)
 
 ## Architecture
 
-```
-                     User Interaction
-                            |
-                            v
-+------------------------------------------------------------------+
-|                      React Frontend                               |
-|   Conversation-first UI with contextual cards                     |
-|   [Quick Query] [Deep Analysis] modes + Autonomous status         |
-+------------------------------------------------------------------+
-                            |
-                            v
-+------------------------------------------------------------------+
-|                      Flask Server                                 |
-|   /api/agent/chat, /api/autonomous/*, /api/health/score           |
-+------------------------------------------------------------------+
-                            |
-          +-----------------+-----------------+
-          |                 |                 |
-          v                 v                 v
-+------------------+ +---------------+ +------------------+
-|  LangGraph Agent | |  Autonomous   | |   Data APIs      |
-|  Quick/Deep modes| |  Scheduler    | |   Health, Alerts |
-+------------------+ +---------------+ +------------------+
-          |                 |                 |
-          +-----------------+-----------------+
-                            |
-                            v
-+------------------------------------------------------------------+
-|                    Databricks Platform                            |
-|   Unity Catalog | Vector Search | Foundation Models | MLflow      |
-+------------------------------------------------------------------+
+```mermaid
+flowchart TB
+    subgraph frontend [React Frontend]
+        UI["Conversation UI + Dashboard"]
+    end
+
+    subgraph server [Flask API Server]
+        API["REST + SSE Endpoints"]
+    end
+
+    subgraph agents [Agent Layer]
+        direction LR
+        QQ["Quick Query\n(ReAct)"]
+        DA["Deep Analysis\n(Multi-Agent)"]
+        AU["Autonomous\n(APScheduler)"]
+    end
+
+    subgraph platform [Databricks Platform]
+        direction LR
+        UC["Unity Catalog"]
+        VS["Vector Search"]
+        FM["Foundation Models"]
+        ML["MLflow Tracing"]
+    end
+
+    UI --> API
+    API --> QQ & DA & AU
+    QQ & DA & AU --> UC & VS & FM
+    DA --> ML
 ```
 
 ## Agent Modes
 
-### Quick Query (Orchestrator)
-Fast, focused answers. Pre-selects relevant tools based on your question.
-- "What's the average LOS at Hospital A?" -> SQL query
-- "Find similar encounters" -> Vector search
-- Suggests Deep Analysis mode for complex questions
-- Response in 2-5 seconds
+### Quick Query
+Fast ReAct agent with intent classification. Classifies your question (data lookup, search, analysis) and selects the right tools. Responds in 2-5 seconds.
+
+<details>
+<summary>Architecture diagram</summary>
 
 ```mermaid
 graph LR
@@ -59,9 +126,13 @@ graph LR
     Default --> ReAct
     ReAct --> Response[Concise Response]
 ```
+</details>
 
-### Deep Analysis (Multi-Agent)
-Multi-agent graph with LLM supervisor, streaming progress to the UI via SSE.
+### Deep Analysis
+Multi-agent LangGraph graph with LLM supervisor. Streams progress via SSE. The supervisor routes between planning, retrieval, analysis, and clarification nodes. Responds in 30-90 seconds with structured reports, evidence citations, and SOP-grounded recommendations.
+
+<details>
+<summary>Architecture diagram</summary>
 
 ```mermaid
 graph TD
@@ -80,15 +151,13 @@ graph TD
     Clarify --> Respond
     Respond --> Done[Stream Final Response via SSE]
 ```
-
-**Sub-agents:**
-- **Supervisor** -- LLM-based router deciding the next step (CLARIFY / PLAN / RETRIEVE / ANALYZE / RESPOND)
-- **Planner** -- Assesses data needs, identifies prerequisite gaps, produces a numbered data-gathering plan
-- **Retrieval** -- ReAct agent with all data tools (SQL, vector search, SOP lookup, cost/LOS/ED/staffing analyzers)
-- **Analyst** -- Interprets evidence, produces structured report with citations and impact, saves via `write_analysis`
+</details>
 
 ### Autonomous Mode
-Background agent that continuously monitors and generates actionable reports.
+Background agent (APScheduler) that monitors operational health and generates recommended action reports only when issues are detected. Configurable interval, auto-stops after 2 hours.
+
+<details>
+<summary>Architecture diagram</summary>
 
 ```mermaid
 graph TD
@@ -98,20 +167,11 @@ graph TD
     Save --> Callback[Notify Callbacks]
     Callback --> Scheduler
 ```
-
-**Capabilities:**
-- **Drug Cost Monitoring** (20%) - Monitors drug costs, flags spikes, identifies high-cost drivers
-- **LOS Analysis** (25%) - Analyzes length of stay patterns, Monday discharge effect, department benchmarks
-- **ED Performance** (15%) - Monitors wait times by acuity, threshold breaches
-- **Staffing Optimization** (15%) - Contract labor analysis, cost differential, recruitment ROI
-- **Next Best Action Report** (20%) - Synthesizes findings into prioritized sign-off ready actions
-- **Compliance Monitoring** (5%) - KPIs against accreditation thresholds
-
-All recommendations are SOP-grounded.
+</details>
 
 ## Data Model
 
-5 core tables + 1 derived view:
+5 core tables + 1 derived view, all generated synthetically with built-in patterns for the agent to discover:
 
 ```
 dim_encounters (patient encounter metadata)
@@ -127,81 +187,124 @@ dim_encounters (patient encounter metadata)
 hospital_overview (VIEW - derived from dim_encounters)
 ```
 
-**Application tables** (Lakebase with Unity Catalog fallback):
-- `analysis_outputs` - Agent insights, recommendations, sign-off status
+**Health Score**: Composite 0-100 score from: 40% avg LOS (target <5d) + 30% readmission rate (target <10%) + 30% ED breaches.
 
-## Target Questions
+## Notebooks
 
-The data model is designed to answer questions like:
-- Why did drug costs spike in November for Hospital A?
-- What specific actions can I take to reduce LOS in Hospital A?
-- Why is LOS higher for patients discharged on Mondays?
-- How can I reduce wait times in the Emergency Department?
-- How can I lower the use of contract labor in the cardiology department?
-
-## Health Score
-
-A composite score (0-100) calculated from:
-- 40% - Average length of stay (target: <5 days)
-- 30% - Readmission rate (target: <10%)
-- 30% - ED wait time breaches
-
-## Quick Start
-
-### 1. Prerequisites
-- Databricks workspace with Unity Catalog
-- SQL Warehouse
-- (Optional) Lakebase instance for transactional tables
-
-### 2. Generate Data
-```bash
-databricks bundle run generate_data \
-  --params encounter_count=10000 \
-  --params months_back=12
-```
-
-See [`notebooks/00_generate_data.py`](notebooks/00_generate_data.py)
-
-### 3. Deploy
-```bash
-cd medical_logistics_nba_app
-./deploy.sh dev
-```
-
-### 4. Access
-The app URL will be shown in your Databricks workspace under Apps.
+| Notebook | Description |
+|----------|-------------|
+| `00_generate_data.py` | Generate synthetic hospital data (encounters, drug costs, staffing, ED waits, KPIs). Supports `overwrite` and `append` modes. |
+| `01_setup_lakebase.py` | Configure Lakebase instance and `analysis_outputs` table |
+| `02_setup_vector_search.py` | Create Vector Search endpoint and encounter similarity index |
+| `03_grant_permissions.py` | Grant Unity Catalog permissions to the app service principal |
+| `04_diagnostic_check.py` | Validate all prerequisites (tables, indexes, endpoints, permissions) |
+| `05_setup_sop_vector_search.py` | Parse SOP documents and create SOP vector search index |
+| `06_simplify_data_model.py` | Setup and refresh the data model tables and views |
+| `07_generate_batches.py` | Generate incremental data batches for testing |
+| `08_setup_lakebase_migrations.py` | Run Alembic migrations for Lakebase schema |
 
 ## Configuration
 
-Environment variables in `app/app.yaml`:
+Environment variables in `app/app.yaml` (auto-generated by `setup.sh` from `variables.yml`):
 
-- `CATALOG` - Unity Catalog name
-- `SCHEMA` - Schema containing tables (default: `med_logistics_nba`)
-- `DATABRICKS_WAREHOUSE_ID` - SQL Warehouse ID
-- `LLM_MODEL_RAG` - Foundation model (default: `databricks-claude-sonnet-4-5`)
-- `AUTONOMOUS_INTERVAL_SECONDS` - How often autonomous mode runs (default: 60)
-- `MLFLOW_EXPERIMENT` - MLflow experiment path for tracing
-- `LAKEBASE_HOST` - (Optional) Lakebase hostname
-- `LAKEBASE_DATABASE` - (Optional) Lakebase database name
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CATALOG` | Unity Catalog name | -- |
+| `SCHEMA` | Schema containing tables | `med_logistics_nba` |
+| `DATABRICKS_WAREHOUSE_ID` | SQL Warehouse ID | -- |
+| `VECTOR_SEARCH_ENDPOINT` | Vector Search endpoint name | -- |
+| `LLM_MODEL_ORCHESTRATOR` | Foundation model for quick query | `databricks-claude-sonnet-4-5` |
+| `LLM_MODEL_RAG` | Foundation model for deep analysis / RAG | `databricks-claude-sonnet-4-5` |
+| `AUTONOMOUS_INTERVAL_SECONDS` | How often autonomous mode checks (seconds) | `3600` |
+| `AUTO_START_AUTONOMOUS` | Start autonomous mode on app boot | `false` |
 
-See [`docs/LAKEBASE_SETUP.md`](docs/LAKEBASE_SETUP.md) for Lakebase configuration.
+## Project Structure
 
-## API Endpoints
+```
+medical_logistics_nba_app/
+  setup.sh                    # One-command setup (recommended entry point)
+  deploy.sh                   # Deploy steps called by setup.sh (permissions, vector search, diagnostics)
+  databricks.yml              # DAB config (dev + prod targets)
+  variables.yml               # Bundle variables (catalog, schema, warehouse, models)
+  app/                        # Databricks App (Flask + React)
+    api_server.py             #   Flask API server with REST + SSE endpoints
+    app.yaml                  #   App config (auto-generated by setup.sh from variables.yml)
+    agent/                    #   Agent implementations
+      config.py               #     Centralized configuration (env vars, table names, constants)
+      orchestrator.py         #     Quick Query mode (ReAct with intent classification)
+      graph.py                #     Deep Analysis mode (multi-agent LangGraph StateGraph)
+      autonomous.py           #     Autonomous mode (APScheduler + smart health check)
+      tools.py                #     Shared agent tools (SQL, vector search, SOP, KPI)
+    src/                      #   React frontend (Vite + Tailwind)
+      App.jsx                 #     Main app component
+      components/             #     UI components (Header, Chat, Dashboard, DemoGuide, Settings)
+  src/                        # Shared Python source (mirrored for notebooks)
+    agent/                    #   Agent code (graph, orchestrator, tools)
+  notebooks/                  # Databricks notebooks (see table above)
+  resources/                  # DAB resource definitions (jobs.yml, apps.yml)
+  data/                       # Sample data
+    sop_samples/              #   Sample SOP documents for vector search
+  docs/                       # Documentation
+```
 
-- `POST /api/agent/chat` - Chat with agent
-- `GET /api/autonomous/status` - Autonomous mode status
-- `POST /api/autonomous/start` - Start autonomous mode
-- `POST /api/autonomous/stop` - Stop autonomous mode
-- `PATCH /api/autonomous/config` - Configure interval, capabilities
-- `GET /api/health/score` - Composite health score
-- `GET /api/alerts/active` - Active alerts
-- `GET /api/encounters/summary` - Encounter summary stats
-- `GET /api/encounters/timeline` - Encounters by day
-- `GET /api/encounters/readmissions` - Recent readmissions
-- `GET /api/recommendations/pending` - Pending sign-off items
-- `POST /api/recommendations/:id/approve` - Approve recommendation
-- `POST /api/recommendations/:id/reject` - Reject recommendation
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`docs/BUILDING_AGENTS.md`](docs/BUILDING_AGENTS.md) | Developer guide: how the agent architecture works and how to extend it |
+| [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md) | 15-minute demo walkthrough script for presenters |
+| [`docs/GAP_ANALYSIS.md`](docs/GAP_ANALYSIS.md) | Business value proposition and competitive landscape |
+| [`docs/QUICK_REFERENCE.md`](docs/QUICK_REFERENCE.md) | One-page demo cheat sheet |
+| [`docs/LAKEBASE_SETUP.md`](docs/LAKEBASE_SETUP.md) | Optional Lakebase configuration guide |
+
+## Libraries
+
+### Python Backend
+
+| Library | Version | License | Description | PyPI |
+|---------|---------|---------|-------------|------|
+| flask | >= 3.0.0 | BSD-3-Clause | Lightweight WSGI web framework | [PyPI](https://pypi.org/project/Flask/) |
+| flask-cors | >= 4.0.0 | MIT | Cross-Origin Resource Sharing for Flask | [PyPI](https://pypi.org/project/Flask-Cors/) |
+| databricks-sdk | >= 0.20.0 | Apache 2.0 | Databricks SDK for Python | [PyPI](https://pypi.org/project/databricks-sdk/) |
+| databricks-langchain | >= 0.1.0 | MIT | LangChain integration for Databricks | [PyPI](https://pypi.org/project/databricks-langchain/) |
+| databricks-vectorsearch | >= 0.40 | Apache 2.0 | Databricks Vector Search client | [PyPI](https://pypi.org/project/databricks-vectorsearch/) |
+| langgraph | >= 0.2.0 | MIT | Multi-agent orchestration framework | [PyPI](https://pypi.org/project/langgraph/) |
+| langchain-core | >= 0.3.0 | MIT | Core LangChain abstractions | [PyPI](https://pypi.org/project/langchain-core/) |
+| gunicorn | >= 21.2.0 | MIT | Python WSGI HTTP server | [PyPI](https://pypi.org/project/gunicorn/) |
+| httpx | >= 0.25.0 | BSD-3-Clause | Async HTTP client | [PyPI](https://pypi.org/project/httpx/) |
+| apscheduler | >= 3.10.0 | MIT | Advanced Python Scheduler | [PyPI](https://pypi.org/project/APScheduler/) |
+| sqlalchemy | >= 2.0.0 | MIT | SQL toolkit and ORM | [PyPI](https://pypi.org/project/SQLAlchemy/) |
+| alembic | >= 1.13.0 | MIT | Database migration tool for SQLAlchemy | [PyPI](https://pypi.org/project/alembic/) |
+| psycopg2-binary | >= 2.9.0 | LGPL-3.0 | PostgreSQL adapter for Python | [PyPI](https://pypi.org/project/psycopg2-binary/) |
+| mlflow | >= 2.10.0 | Apache 2.0 | ML lifecycle management and tracing | [PyPI](https://pypi.org/project/mlflow/) |
+
+### Frontend
+
+| Library | Version | License | Description | npm |
+|---------|---------|---------|-------------|-----|
+| react | ^18.3.1 | MIT | UI component library | [npm](https://www.npmjs.com/package/react) |
+| react-dom | ^18.3.1 | MIT | React DOM renderer | [npm](https://www.npmjs.com/package/react-dom) |
+| react-markdown | ^9.0.1 | MIT | Markdown renderer for React | [npm](https://www.npmjs.com/package/react-markdown) |
+| tailwindcss | ^3.4.1 | MIT | Utility-first CSS framework | [npm](https://www.npmjs.com/package/tailwindcss) |
+| vite | ^5.4.0 | MIT | Frontend build tool | [npm](https://www.npmjs.com/package/vite) |
+
+### Runtime (provided by Databricks)
+
+| Library | License | Description |
+|---------|---------|-------------|
+| pyspark | Apache 2.0 | Apache Spark Python API |
+| dbldatagen | Apache 2.0 | Databricks Labs synthetic data generator |
+| faker | MIT | Fake data generation library |
+
+### Foundation Models
+
+| Model | Provider | Usage |
+|-------|----------|-------|
+| databricks-claude-sonnet-4-5 | Anthropic (via Databricks) | Deep analysis, RAG, autonomous agent |
+| databricks-gte-large-en | Databricks | Vector Search embeddings |
+
+All application dependencies use permissive open-source licenses (MIT, Apache 2.0, BSD-3-Clause) except `psycopg2-binary` (LGPL-3.0, optional -- only used with Lakebase).
 
 ## License
 
-Internal use. See your organization's policies.
+[DB License](LICENSE.md)

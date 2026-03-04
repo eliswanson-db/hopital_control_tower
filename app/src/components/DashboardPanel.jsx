@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '../lib/utils'
 
-function StatCard({ title, value, subtitle, trend, color = 'teal' }) {
+function StatCard({ title, value, subtitle, trend, color = 'teal', tooltip }) {
   const colorClasses = {
     teal: 'from-teal-500/20 to-teal-600/10 border-teal-500/30',
     red: 'from-red-500/20 to-red-600/10 border-red-500/30',
@@ -9,7 +9,7 @@ function StatCard({ title, value, subtitle, trend, color = 'teal' }) {
     blue: 'from-blue-500/20 to-blue-600/10 border-blue-500/30',
   }
   return (
-    <div className={cn("p-4 rounded-xl bg-gradient-to-br border", colorClasses[color])}>
+    <div className={cn("p-4 rounded-xl bg-gradient-to-br border", colorClasses[color])} title={tooltip}>
       <p className="text-xs text-slate-400 uppercase tracking-wide mb-1">{title}</p>
       <p className="text-2xl font-semibold text-warm-white">{value}</p>
       {subtitle && <p className="text-xs text-slate-400 mt-1">{subtitle}</p>}
@@ -24,7 +24,7 @@ function StatCard({ title, value, subtitle, trend, color = 'teal' }) {
 
 function TimelineBar({ data }) {
   if (!data || data.length === 0) {
-    return <div className="h-24 flex items-center justify-center text-slate-500 text-sm">No timeline data</div>
+    return <div className="h-24 flex items-center justify-center text-slate-500 text-xs text-center px-4">No encounter data yet. Run the generate_data job or click "Inject Good" to add sample data.</div>
   }
   const maxEnc = Math.max(...data.map(d => d.encounters), 1)
   return (
@@ -81,7 +81,7 @@ const TYPE_LABELS = {
   ed_performance: 'ED Wait Time Alert',
   staffing_analysis: 'Staffing Optimization',
   compliance_monitoring: 'Compliance Check',
-  next_best_action_report: 'Next Best Action',
+  next_best_action_report: 'Recommended Actions',
   readiness_check: 'Readiness Check',
 }
 
@@ -122,6 +122,7 @@ function AlertTile({ alert, onClick }) {
   }
   return (
     <button onClick={onClick}
+      title="Click to investigate this alert with the AI agent"
       className={cn("w-full text-left p-3 rounded-lg border transition-all",
         severityColors[alert.severity] || severityColors.medium)}>
       <p className="text-xs font-medium text-warm-white">{alert.title}</p>
@@ -130,13 +131,22 @@ function AlertTile({ alert, onClick }) {
   )
 }
 
+function EmptyTile({ title, message }) {
+  return (
+    <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
+      <h4 className="text-xs font-medium text-slate-400 uppercase mb-2">{title}</h4>
+      <p className="text-xs text-slate-500">{message}</p>
+    </div>
+  )
+}
+
 function EdWaitTile({ data }) {
-  if (!data || !data.levels?.length) return null
+  if (!data || !data.levels?.length) return <EmptyTile title="ED Wait by Acuity" message="No ED wait data. Ensure fact_ed_wait_times table has data." />
   const maxWait = Math.max(...data.levels.map(l => l.avg_wait), 1)
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-xs font-medium text-slate-400 uppercase">ED Wait by Acuity</h4>
+        <h4 className="text-xs font-medium text-slate-400 uppercase" title="Average ED wait time by triage acuity level. Red bars indicate threshold breaches">ED Wait by Acuity</h4>
         {data.total_breaches > 0 && (
           <span className="text-[10px] px-2 py-0.5 bg-red-500/20 text-red-400 rounded">
             {data.total_breaches} breaches
@@ -161,11 +171,11 @@ function EdWaitTile({ data }) {
 }
 
 function DrugCostTile({ data }) {
-  if (!data || !data.categories?.length) return null
+  if (!data || !data.categories?.length) return <EmptyTile title="Drug Costs (30d)" message="No drug cost data. Ensure fact_drug_costs table has data." />
   const topSpend = Math.max(...data.categories.map(c => c.spend), 1)
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
-      <h4 className="text-xs font-medium text-slate-400 uppercase mb-1">Drug Costs (30d)</h4>
+      <h4 className="text-xs font-medium text-slate-400 uppercase mb-1" title="Total pharmacy spend and top drug categories over 30 days">Drug Costs (30d)</h4>
       <p className="text-lg font-semibold text-warm-white mb-3">${data.total_spend.toLocaleString()}</p>
       <div className="space-y-2">
         {data.categories.map(c => (
@@ -184,11 +194,11 @@ function DrugCostTile({ data }) {
 }
 
 function StaffingTile({ data }) {
-  if (!data || !data.departments?.length) return null
+  if (!data || !data.departments?.length) return <EmptyTile title="Contract Labor Mix" message="No staffing data. Ensure fact_staffing table has data." />
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-xs font-medium text-slate-400 uppercase">Contract Labor Mix</h4>
+        <h4 className="text-xs font-medium text-slate-400 uppercase" title="Percentage of contract vs. full-time staff by department. Target: under 25%">Contract Labor Mix</h4>
         <span className={cn("text-xs font-medium",
           data.overall_contract_pct > 25 ? "text-red-400" : "text-green-400")}>
           {data.overall_contract_pct}% overall
@@ -211,7 +221,77 @@ function StaffingTile({ data }) {
   )
 }
 
-export default function DashboardPanel({ onQuerySelect }) {
+function LosByDeptTile({ data }) {
+  if (!data || !data.length) return <EmptyTile title="LOS by Department" message="No encounter data available." />
+  const maxLos = Math.max(...data.map(d => d.avg_los), 1)
+  return (
+    <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
+      <h4 className="text-xs font-medium text-slate-400 uppercase mb-3" title="Average length of stay by department (30 days). Target: under 5 days">LOS by Department</h4>
+      <div className="space-y-2">
+        {data.slice(0, 5).map(d => (
+          <div key={d.department} className="flex items-center gap-2">
+            <span className="text-[10px] text-slate-400 w-20 truncate">{d.department}</span>
+            <div className="flex-1 bg-slate-700/30 rounded-full h-2.5 overflow-hidden">
+              <div className={cn("h-full rounded-full", d.avg_los > 5 ? "bg-red-500/60" : "bg-teal-500/60")}
+                style={{ width: `${Math.max(8, d.avg_los / maxLos * 100)}%` }} />
+            </div>
+            <span className="text-[10px] text-slate-300 w-10 text-right">{d.avg_los}d</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PayerMixTile({ data }) {
+  if (!data || !data.length) return <EmptyTile title="Payer Mix" message="No encounter data available." />
+  const total = data.reduce((s, d) => s + d.count, 0) || 1
+  const colors = ['bg-teal-500/70', 'bg-blue-500/70', 'bg-amber-500/70', 'bg-purple-500/70', 'bg-green-500/70', 'bg-red-500/70']
+  return (
+    <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
+      <h4 className="text-xs font-medium text-slate-400 uppercase mb-3" title="Patient encounter distribution by insurance payer">Payer Mix</h4>
+      <div className="flex rounded-full h-4 overflow-hidden mb-3">
+        {data.map((d, i) => (
+          <div key={d.payer} className={colors[i % colors.length]}
+            style={{ width: `${d.count / total * 100}%` }} title={`${d.payer}: ${d.count}`} />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1">
+        {data.map((d, i) => (
+          <span key={d.payer} className="text-[10px] text-slate-400 flex items-center gap-1">
+            <div className={cn("w-2 h-2 rounded-sm", colors[i % colors.length])} />
+            {d.payer} ({Math.round(d.count / total * 100)}%)
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function HealthTrendTile({ data }) {
+  if (!data || data.length < 2) return null
+  const scores = data.map(d => d.score).filter(Boolean)
+  if (scores.length < 2) return null
+  const max = Math.max(...scores, 100)
+  const min = Math.min(...scores, 0)
+  const range = max - min || 1
+  return (
+    <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
+      <h4 className="text-xs font-medium text-slate-400 uppercase mb-3" title="Health score trend over recent checks">Health Trend</h4>
+      <div className="flex items-end gap-1 h-12">
+        {data.slice(-15).map((d, i) => (
+          <div key={i} className="flex-1 flex flex-col justify-end">
+            <div className={cn("rounded-t", d.score >= 80 ? "bg-green-500/60" : d.score >= 60 ? "bg-amber-500/60" : "bg-red-500/60")}
+              style={{ height: `${Math.max(4, ((d.score - min) / range) * 40)}px` }}
+              title={`${d.score}/100`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export default function DashboardPanel({ onQuerySelect, refreshKey }) {
   const [summary, setSummary] = useState(null)
   const [timeline, setTimeline] = useState([])
   const [readmissions, setReadmissions] = useState([])
@@ -220,11 +300,14 @@ export default function DashboardPanel({ onQuerySelect }) {
   const [edData, setEdData] = useState(null)
   const [drugData, setDrugData] = useState(null)
   const [staffingData, setStaffingData] = useState(null)
+  const [losByDept, setLosByDept] = useState([])
+  const [payerMix, setPayerMix] = useState([])
+  const [healthHistory, setHealthHistory] = useState([])
   const [loading, setLoading] = useState(true)
 
   const fetchData = useCallback(async () => {
     try {
-      const [summaryRes, timelineRes, readmitRes, recsRes, alertsRes, edRes, drugRes, staffRes] = await Promise.all([
+      const [summaryRes, timelineRes, readmitRes, recsRes, alertsRes, edRes, drugRes, staffRes, losRes, payerRes, histRes] = await Promise.all([
         fetch('/api/encounters/summary'),
         fetch('/api/encounters/timeline?days=30'),
         fetch('/api/encounters/readmissions?limit=5'),
@@ -233,10 +316,13 @@ export default function DashboardPanel({ onQuerySelect }) {
         fetch('/api/ed/summary'),
         fetch('/api/drugs/summary'),
         fetch('/api/staffing/summary'),
+        fetch('/api/encounters/los-by-dept'),
+        fetch('/api/encounters/payer-mix'),
+        fetch('/api/health/history'),
       ])
-      const [summaryData, timelineData, readmitData, recsData, alertsData, edD, drugD, staffD] = await Promise.all([
+      const [summaryData, timelineData, readmitData, recsData, alertsData, edD, drugD, staffD, losD, payerD, histD] = await Promise.all([
         summaryRes.json(), timelineRes.json(), readmitRes.json(), recsRes.json(), alertsRes.json(),
-        edRes.json(), drugRes.json(), staffRes.json(),
+        edRes.json(), drugRes.json(), staffRes.json(), losRes.json(), payerRes.json(), histRes.json(),
       ])
       setSummary(summaryData.summary)
       setTimeline(timelineData.timeline || [])
@@ -246,6 +332,9 @@ export default function DashboardPanel({ onQuerySelect }) {
       setEdData(edD)
       setDrugData(drugD)
       setStaffingData(staffD)
+      setLosByDept(losD.departments || [])
+      setPayerMix(payerD.payers || [])
+      setHealthHistory(histD.history || [])
     } catch (err) {
       console.error('Dashboard fetch error:', err)
     } finally {
@@ -257,11 +346,11 @@ export default function DashboardPanel({ onQuerySelect }) {
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [fetchData])
+  }, [fetchData, refreshKey])
 
   if (loading) {
     return (
-      <div className="w-96 flex-shrink-0 bg-slate-900/30 border-l border-slate-700/30 p-4">
+      <div className="w-[480px] flex-shrink-0 bg-slate-900/30 border-l border-slate-700/30 p-4">
         <div className="animate-pulse space-y-4">
           <div className="h-20 bg-slate-800/50 rounded-xl" />
           <div className="h-20 bg-slate-800/50 rounded-xl" />
@@ -272,7 +361,7 @@ export default function DashboardPanel({ onQuerySelect }) {
   }
 
   return (
-    <div className="w-96 flex-shrink-0 bg-slate-900/30 border-l border-slate-700/30 overflow-y-auto custom-scrollbar">
+    <div className="w-[480px] flex-shrink-0 bg-slate-900/30 border-l border-slate-700/30 overflow-y-auto custom-scrollbar">
       <div className="p-4 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-warm-white">Dashboard</h3>
@@ -283,21 +372,26 @@ export default function DashboardPanel({ onQuerySelect }) {
           <StatCard title="Encounters"
             value={summary?.total_encounters || 0}
             trend={summary?.trends?.enc_trend}
+            tooltip="Total patient encounters in the last 30 days"
             color="blue" />
           <StatCard title="Avg LOS"
             value={`${summary?.avg_los || 0}d`}
             trend={summary?.trends?.los_trend}
+            tooltip="Average length of stay in days. Target: under 5 days"
             color={parseFloat(summary?.avg_los) > 5 ? 'red' : parseFloat(summary?.avg_los) > 4 ? 'teal' : 'green'} />
           <StatCard title="Readmit Rate"
             value={`${summary?.readmission_rate || 0}%`}
             subtitle={`${summary?.readmissions || 0} total`}
             trend={summary?.trends?.readmit_trend}
+            tooltip="Percentage of patients readmitted within 30 days. Target: under 10%"
             color={parseFloat(summary?.readmission_rate) > 10 ? 'red' : 'green'} />
         </div>
 
+        <HealthTrendTile data={healthHistory} />
+
         {alerts.length > 0 && (
           <div className="space-y-2">
-            <h4 className="text-xs font-medium text-slate-400 uppercase">Active Alerts</h4>
+            <h4 className="text-xs font-medium text-slate-400 uppercase" title="Operational issues detected from latest data. Click an alert to investigate with the AI agent">Active Alerts</h4>
             {alerts.map((a, i) => (
               <AlertTile key={i} alert={a} onClick={() => onQuerySelect?.(
                 `Investigate the ${a.title.toLowerCase()} issue: ${a.detail}`
@@ -307,7 +401,7 @@ export default function DashboardPanel({ onQuerySelect }) {
         )}
 
         <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
-          <h4 className="text-xs font-medium text-slate-400 uppercase mb-3">30-Day Encounter Volume</h4>
+          <h4 className="text-xs font-medium text-slate-400 uppercase mb-3" title="Daily encounter and readmission counts over the past 30 days">30-Day Encounter Volume</h4>
           <TimelineBar data={timeline} />
           <div className="flex items-center gap-4 mt-2 text-[10px] text-slate-500">
             <span className="flex items-center gap-1"><div className="w-2 h-2 bg-teal-500/60 rounded" /> Encounters</span>
@@ -315,25 +409,30 @@ export default function DashboardPanel({ onQuerySelect }) {
           </div>
         </div>
 
+        <div className="grid grid-cols-2 gap-3">
+          <LosByDeptTile data={losByDept} />
+          <PayerMixTile data={payerMix} />
+        </div>
+
         <EdWaitTile data={edData} />
         <DrugCostTile data={drugData} />
         <StaffingTile data={staffingData} />
 
         <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
-          <h4 className="text-xs font-medium text-slate-400 uppercase mb-2">Recent Readmissions</h4>
+          <h4 className="text-xs font-medium text-slate-400 uppercase mb-2" title="Patients recently readmitted, sorted by most recent. Flags high LOS and drug cost">Recent Readmissions</h4>
           {readmissions.length > 0 ? (
             readmissions.map((enc, i) => <ReadmissionItem key={i} enc={enc} />)
           ) : (
-            <p className="text-sm text-slate-500 py-2">No recent readmissions</p>
+            <p className="text-xs text-slate-500 py-2">No recent readmissions. Use "Inject Anomaly" to generate test readmission data.</p>
           )}
         </div>
 
         <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
-          <h4 className="text-xs font-medium text-slate-400 uppercase mb-2">Recommended Actions</h4>
+          <h4 className="text-xs font-medium text-slate-400 uppercase mb-2" title="AI-generated action items from autonomous monitoring and deep analysis">Recommended Actions</h4>
           {recommendations.length > 0 ? (
             recommendations.map((rec, i) => <RecommendationItem key={i} rec={rec} />)
           ) : (
-            <p className="text-sm text-slate-500 py-2">No recommendations yet</p>
+            <p className="text-xs text-slate-500 py-2">No recommendations yet. Start Autonomous mode or run a Deep Analysis to generate action items.</p>
           )}
         </div>
       </div>

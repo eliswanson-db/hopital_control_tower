@@ -2,66 +2,55 @@
 # MAGIC %md
 # MAGIC # Grant Permissions to App Service Principal
 # MAGIC 
-# MAGIC Grants permissions for the Medical Logistics NBA app to access all data tables, models, and vector search.
+# MAGIC Grants permissions for the Hospital Control Tower app to access all data tables, models, and vector search.
 
 # COMMAND ----------
 
 # Configuration
 CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
 SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
-APP_NAME = spark.conf.get("var.app_name", "dev-med-logistics-nba")
-SP_ID = spark.conf.get("var.service_principal_id", "")
-SP_NAME = spark.conf.get("var.service_principal_name", "")
+APP_NAME = spark.conf.get("var.app_name", "dev-hospital-control-tower")
 
 print(f"Catalog: {CATALOG}")
 print(f"Schema: {SCHEMA}")
 print(f"App Name: {APP_NAME}")
-print(f"Service Principal ID: {SP_ID}")
-print(f"Service Principal Name: {SP_NAME}")
 
 # COMMAND ----------
 
-# Determine the principal to grant to - try name first, then ID
-if SP_NAME:
-    PRINCIPAL = f"`{SP_NAME}`"
-    print(f"Using service principal name: {PRINCIPAL}")
-elif SP_ID:
-    from databricks.sdk import WorkspaceClient
-    w = WorkspaceClient()
-    try:
-        sp = w.service_principals.get(SP_ID)
-        PRINCIPAL = f"`{sp.display_name}`"
-        print(f"Looked up service principal: {PRINCIPAL}")
-    except Exception as e:
-        print(f"Could not look up SP by ID: {e}")
-        PRINCIPAL = f"`{APP_NAME}`"
-        print(f"Falling back to app name: {PRINCIPAL}")
-else:
-    PRINCIPAL = f"`{APP_NAME}`"
-    print(f"Using app name as principal: {PRINCIPAL}")
+# Look up the app's service principal via SDK (requires databricks-sdk>=0.90.0 pinned in jobs.yml)
+from databricks.sdk import WorkspaceClient
+w = WorkspaceClient()
+
+app_info = w.apps.get(name=APP_NAME)
+SP_NAME = app_info.service_principal_name
+SP_ID = str(app_info.service_principal_id or "")
+SP_CLIENT_ID = app_info.service_principal_client_id
+if not SP_CLIENT_ID:
+    raise RuntimeError(f"App '{APP_NAME}' has no service_principal_client_id.")
+PRINCIPAL = f"`{SP_CLIENT_ID}`"
+print(f"Resolved SP from app '{APP_NAME}': {PRINCIPAL} (id={SP_ID})")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 1. Grant Catalog and Schema Access
+# MAGIC These are critical -- if they fail, nothing else works.
 
 # COMMAND ----------
 
 spark.sql(f"USE CATALOG {CATALOG}")
 
-# Grant USE CATALOG
-try:
-    spark.sql(f"GRANT USE CATALOG ON CATALOG {CATALOG} TO {PRINCIPAL}")
-    print(f"Granted USE CATALOG on {CATALOG}")
-except Exception as e:
-    print(f"USE CATALOG: {e}")
+# USE CATALOG -- must succeed or the whole notebook fails
+spark.sql(f"GRANT USE CATALOG ON CATALOG {CATALOG} TO {PRINCIPAL}")
+print(f"OK: Granted USE CATALOG on {CATALOG} to {PRINCIPAL}")
 
-# Grant USE SCHEMA
-try:
-    spark.sql(f"GRANT USE SCHEMA ON SCHEMA {CATALOG}.{SCHEMA} TO {PRINCIPAL}")
-    print(f"Granted USE SCHEMA on {CATALOG}.{SCHEMA}")
-except Exception as e:
-    print(f"USE SCHEMA: {e}")
+# USE SCHEMA -- must succeed
+spark.sql(f"GRANT USE SCHEMA ON SCHEMA {CATALOG}.{SCHEMA} TO {PRINCIPAL}")
+print(f"OK: Granted USE SCHEMA on {CATALOG}.{SCHEMA} to {PRINCIPAL}")
+
+# CREATE TABLE -- needed so the app can self-heal analysis_outputs on startup
+spark.sql(f"GRANT CREATE TABLE ON SCHEMA {CATALOG}.{SCHEMA} TO {PRINCIPAL}")
+print(f"OK: Granted CREATE TABLE on {CATALOG}.{SCHEMA} to {PRINCIPAL}")
 
 # COMMAND ----------
 
@@ -70,45 +59,40 @@ except Exception as e:
 
 # COMMAND ----------
 
-# All tables the app needs to READ (medical logistics model)
+# Tables the app reads only
 READ_TABLES = [
-    # Core encounter and fact tables
-    "dim_encounters",
-    "fact_drug_costs",
-    "fact_staffing",
-    "fact_ed_wait_times",
     "fact_operational_kpis",
-    "hospital_overview",  # View (derived from above)
-    # Embedding tables for vector search
+    "hospital_overview",
     "encounters_for_embedding",
-    # SOP tables for RAG
     "sop_pdfs",
     "sop_parsed",
     "sop_chunks",
 ]
 
-# Tables the app needs to WRITE (MODIFY)
+# Tables the app reads AND writes (INSERT/UPDATE/DELETE)
 WRITE_TABLES = [
+    "dim_encounters",
     "analysis_outputs",
+    "fact_drug_costs",
+    "fact_staffing",
+    "fact_ed_wait_times",
 ]
 
-# Grant SELECT on read tables
-print("\nGranting SELECT permissions:")
+print("Granting SELECT permissions:")
 for table in READ_TABLES:
     try:
         spark.sql(f"GRANT SELECT ON TABLE {CATALOG}.{SCHEMA}.{table} TO {PRINCIPAL}")
-        print(f"  SELECT on {table}")
+        print(f"  OK: SELECT on {table}")
     except Exception as e:
-        print(f"  SELECT on {table}: {e}")
+        print(f"  SKIP: SELECT on {table}: {e}")
 
-# Grant SELECT and MODIFY on write tables
-print("\nGranting SELECT, MODIFY permissions:")
+print("\nGranting SELECT + MODIFY permissions:")
 for table in WRITE_TABLES:
     try:
         spark.sql(f"GRANT SELECT, MODIFY ON TABLE {CATALOG}.{SCHEMA}.{table} TO {PRINCIPAL}")
-        print(f"  SELECT, MODIFY on {table}")
+        print(f"  OK: SELECT, MODIFY on {table}")
     except Exception as e:
-        print(f"  MODIFY on {table}: {e}")
+        print(f"  SKIP: MODIFY on {table}: {e}")
 
 # COMMAND ----------
 
@@ -125,10 +109,6 @@ print(f"Vector Endpoint: {VECTOR_ENDPOINT}")
 print(f"Encounter Vector Index: {ENCOUNTER_VECTOR_INDEX}")
 print(f"SOP Vector Index: {SOP_VECTOR_INDEX}")
 
-from databricks.sdk import WorkspaceClient
-w = WorkspaceClient()
-
-# Grant access to vector search endpoint
 try:
     from databricks.sdk.service.vectorsearch import EndpointAccessControlRequest, EndpointPermissionLevel
     w.vector_search_endpoints.set_permissions(
@@ -140,9 +120,9 @@ try:
             )
         ]
     )
-    print(f"Granted CAN_USE on vector endpoint {VECTOR_ENDPOINT}")
+    print(f"OK: Granted CAN_USE on vector endpoint {VECTOR_ENDPOINT}")
 except Exception as e:
-    print(f"Vector endpoint permission: {e}")
+    print(f"SKIP: Vector endpoint permission: {e}")
 
 print(f"Vector index permissions inherited from source tables:")
 print(f"  - {ENCOUNTER_VECTOR_INDEX} (from encounters_for_embedding)")
@@ -171,9 +151,9 @@ for endpoint_name in MODEL_ENDPOINTS:
                 )
             ]
         )
-        print(f"Granted CAN_QUERY on {endpoint_name}")
+        print(f"OK: Granted CAN_QUERY on {endpoint_name}")
     except Exception as e:
-        print(f"Model {endpoint_name}: {e}")
+        print(f"SKIP: Model {endpoint_name}: {e}")
 
 # COMMAND ----------
 
@@ -185,19 +165,19 @@ for endpoint_name in MODEL_ENDPOINTS:
 print("=" * 60)
 print("PERMISSIONS SUMMARY")
 print("=" * 60)
-print(f"Service Principal: {SP_NAME or APP_NAME}")
+print(f"Service Principal: {PRINCIPAL}")
 print(f"Service Principal ID: {SP_ID or 'N/A'}")
 print(f"")
 print("Data Access:")
 print(f"  - USE CATALOG on {CATALOG}")
 print(f"  - USE SCHEMA on {CATALOG}.{SCHEMA}")
 print(f"  - SELECT on: {', '.join(READ_TABLES)}")
-print(f"  - SELECT, MODIFY on: {', '.join(WRITE_TABLES)}")
+print(f"  - SELECT + MODIFY on: {', '.join(WRITE_TABLES)}")
 print(f"")
 print("Vector Search:")
 print(f"  - CAN_USE on {VECTOR_ENDPOINT}")
-print(f"  - Encounter Index: {ENCOUNTER_VECTOR_INDEX} (inherited from encounters_for_embedding)")
-print(f"  - SOP Index: {SOP_VECTOR_INDEX} (inherited from sop_chunks)")
+print(f"  - Encounter Index: {ENCOUNTER_VECTOR_INDEX}")
+print(f"  - SOP Index: {SOP_VECTOR_INDEX}")
 print(f"")
 print("Models:")
 print(f"  - CAN_QUERY on: {', '.join(MODEL_ENDPOINTS)}")

@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Setup Vector Search for Medical Logistics NBA
+# MAGIC # Setup Vector Search for Hospital Control Tower
 # MAGIC
 # MAGIC Creates embeddings from all encounter data for semantic search.
 

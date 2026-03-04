@@ -1,8 +1,8 @@
-# Lakebase Setup for Medical Logistics NBA App
+# Lakebase Setup for Hospital Control Tower
 
 ## Overview
 
-The Medical Logistics NBA app uses a hybrid data architecture:
+The Hospital Control Tower app uses a hybrid data architecture:
 - **Unity Catalog**: Analytical tables (encounters, costs, staffing, KPIs) for read-heavy operations
 - **Lakebase**: Application tables (analysis_outputs) for transactional writes
 
@@ -15,7 +15,7 @@ This separation provides:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Medical Logistics NBA App                         │
+│                      Hospital Control Tower                            │
 └──────────────┬──────────────────────────┬───────────────────┘
                │                          │
                │ Write                    │ Read

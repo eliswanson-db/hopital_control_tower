@@ -1,5 +1,4 @@
 """Multi-agent deep analysis graph + quick query via LangGraph."""
-import os
 import logging
 import queue
 import threading
@@ -12,13 +11,17 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 
+from .config import (
+    CATALOG, SCHEMA, LLM_MODEL, MLFLOW_EXPERIMENT,
+    ANALYSIS_TABLE, MAX_SUPERVISOR_ITERATIONS,
+)
 from .tools import (
     QUICK_TOOLS,
     execute_sql, search_encounters, search_sops,
     analyze_cost_drivers, analyze_los_factors,
     check_ed_performance, check_staffing_efficiency,
     check_operational_kpis, check_data_freshness,
-    write_analysis, _execute_query, ANALYSIS_TABLE,
+    write_analysis, _execute_query,
 )
 from .orchestrator import select_tools_for_context, get_system_prompt_for_context
 
@@ -27,32 +30,35 @@ logger = logging.getLogger(__name__)
 MLFLOW_ENABLED = False
 try:
     import mlflow
-    mlflow.set_tracking_uri("databricks-uc")
-    MLFLOW_EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "/Shared/med-logistics-nba-agent")
+    mlflow.set_tracking_uri("databricks")
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
-    mlflow.langchain.autolog(log_models=False, log_input_examples=False, log_model_signatures=False)
+    mlflow.langchain.autolog()
     MLFLOW_ENABLED = True
     logger.info(f"MLflow tracing enabled, experiment: {MLFLOW_EXPERIMENT}")
 except Exception as e:
     logger.warning(f"MLflow tracing not available: {e}")
 
-LLM_MODEL = os.environ.get("LLM_MODEL_RAG", "databricks-claude-sonnet-4-5")
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
-SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
-
 ANALYSIS_TYPES = ["cost_monitoring", "los_analysis", "ed_performance", "staffing_analysis", "compliance_monitoring"]
 
 # Module-level progress queue -- set by invoke_deep_agent_streaming before graph runs
 _progress_queue: Optional[queue.Queue] = None
+_routing_trace: list = []
 
 
-def _emit_progress(stage: str, message: str):
+def _emit_progress(stage: str, message: str, agent: str = ""):
+    if agent:
+        _routing_trace.append({"agent": agent, "action": stage, "message": message})
     if _progress_queue is not None:
         _progress_queue.put({"stage": stage, "message": message})
 
 
+_cached_llm = None
+
 def get_llm():
-    return ChatDatabricks(endpoint=LLM_MODEL)
+    global _cached_llm
+    if _cached_llm is None:
+        _cached_llm = ChatDatabricks(endpoint=LLM_MODEL)
+    return _cached_llm
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +96,7 @@ def check_prerequisite_analyses() -> str:
 # ===========================================================================
 
 def create_quick_response(message: str, user_context: Optional[Dict] = None) -> Dict:
-    selected_tools = select_tools_for_context(message, user_context)
+    selected_tools, intent = select_tools_for_context(message, user_context)
     system_prompt = get_system_prompt_for_context(message, selected_tools, user_context)
     if not selected_tools:
         selected_tools = QUICK_TOOLS[:2]
@@ -107,7 +113,7 @@ def create_quick_response(message: str, user_context: Optional[Dict] = None) -> 
                     response_content = msg.content
                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
                     tool_calls_made.extend([tc.get("name", "unknown") for tc in msg.tool_calls])
-        return {"response": response_content, "tool_calls": list(set(tool_calls_made)), "mode": "quick"}
+        return {"response": response_content, "tool_calls": list(set(tool_calls_made)), "mode": "quick", "intent": intent}
     except Exception as e:
         logger.error(f"Quick query error: {e}", exc_info=True)
         try:
@@ -116,9 +122,9 @@ def create_quick_response(message: str, user_context: Optional[Dict] = None) -> 
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=message),
             ])
-            return {"response": resp.content, "tool_calls": [], "mode": "quick", "fallback": True}
+            return {"response": resp.content, "tool_calls": [], "mode": "quick", "fallback": True, "intent": intent}
         except Exception:
-            return {"response": f"Error: {str(e)}", "tool_calls": [], "mode": "quick", "error": str(e)}
+            return {"response": f"Error: {str(e)}", "tool_calls": [], "mode": "quick", "error": str(e), "intent": intent}
 
 
 # ===========================================================================
@@ -222,7 +228,7 @@ Use write_analysis to save key findings when the analysis is significant."""
 
 def supervisor_node(state: DeepAnalysisState) -> dict:
     """LLM-based router that decides the next step."""
-    _emit_progress("routing", "Deciding next step...")
+    _emit_progress("routing", "Deciding next step...", agent="supervisor")
     llm = get_llm()
 
     context_parts = [f"User question: {state['user_query']}"]
@@ -243,7 +249,7 @@ def supervisor_node(state: DeepAnalysisState) -> dict:
     if decision not in valid:
         decision = "RESPOND"
 
-    if len(state.get("iteration", [])) >= 3:
+    if len(state.get("iteration", [])) >= MAX_SUPERVISOR_ITERATIONS:
         if state.get("analysis_result"):
             decision = "RESPOND"
         elif state.get("retrieved_evidence"):
@@ -251,11 +257,12 @@ def supervisor_node(state: DeepAnalysisState) -> dict:
         else:
             decision = "RESPOND"
 
+    _emit_progress("routing", f"Next: {decision}", agent="supervisor")
     return {"next_step": decision, "iteration": [1]}
 
 
 def planner_node(state: DeepAnalysisState) -> dict:
-    _emit_progress("planning", "Creating analysis plan...")
+    _emit_progress("planning", "Creating analysis plan...", agent="planner")
     llm = get_llm()
     context = (
         f"User question: {state['user_query']}\n\n"
@@ -269,7 +276,7 @@ def planner_node(state: DeepAnalysisState) -> dict:
 
 
 def retrieval_node(state: DeepAnalysisState) -> dict:
-    _emit_progress("retrieving", "Gathering evidence from data sources...")
+    _emit_progress("retrieving", "Gathering evidence from data sources...", agent="retrieval")
     retrieval_tools = [
         execute_sql, search_encounters, search_sops,
         analyze_cost_drivers, analyze_los_factors,
@@ -297,7 +304,7 @@ def retrieval_node(state: DeepAnalysisState) -> dict:
 
 
 def analyst_node(state: DeepAnalysisState) -> dict:
-    _emit_progress("analyzing", "Interpreting results and forming recommendations...")
+    _emit_progress("analyzing", "Interpreting results and forming recommendations...", agent="analyst")
     llm = get_llm()
     agent = create_react_agent(llm, [write_analysis])
 
@@ -324,7 +331,7 @@ def analyst_node(state: DeepAnalysisState) -> dict:
 
 
 def respond_node(state: DeepAnalysisState) -> dict:
-    _emit_progress("responding", "Preparing final response...")
+    _emit_progress("responding", "Preparing final response...", agent="respond")
     if state.get("needs_clarification"):
         return {"messages": [AIMessage(content=state.get("clarification_question", "Could you clarify your question?"))]}
 
@@ -340,7 +347,7 @@ def respond_node(state: DeepAnalysisState) -> dict:
 
 
 def clarify_node(state: DeepAnalysisState) -> dict:
-    _emit_progress("clarifying", "Asking for clarification...")
+    _emit_progress("clarifying", "Asking for clarification...", agent="clarify")
     llm = get_llm()
     resp = llm.invoke([
         SystemMessage(content="The user's question is ambiguous. Ask a brief, specific clarifying question to narrow it down."),
@@ -462,23 +469,27 @@ def invoke_deep_agent_streaming(message: str, history: Optional[List[Dict]] = No
         {"stage": "done", "response": "...", "tool_calls": [...]}
         {"stage": "error", "message": "..."}
     """
-    global _progress_queue
+    global _progress_queue, _routing_trace
     q = queue.Queue()
     _progress_queue = q
+    _routing_trace = []
 
     def _run():
-        global _progress_queue
+        global _progress_queue, _routing_trace
         try:
-            _emit_progress("starting", "Checking prerequisites...")
+            _emit_progress("starting", "Checking prerequisites...", agent="system")
             prereq_status = check_prerequisite_analyses()
             query = _build_query(message, history)
             result = _run_deep_graph(query, prereq_status)
-            q.put({"stage": "done", "response": result["response"], "tool_calls": result.get("tool_calls", [])})
+            q.put({"stage": "done", "response": result["response"],
+                   "tool_calls": result.get("tool_calls", []),
+                   "routing_trace": list(_routing_trace)})
         except Exception as e:
             logger.error(f"Streaming deep analysis error: {e}", exc_info=True)
             q.put({"stage": "error", "message": str(e)})
         finally:
             _progress_queue = None
+            _routing_trace = []
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

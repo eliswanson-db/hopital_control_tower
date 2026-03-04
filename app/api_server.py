@@ -1,12 +1,15 @@
-"""Flask server for Medical Logistics NBA App."""
+"""Flask server for Hospital Control Tower App."""
 import os
 import json
 import time
+import uuid
 import queue
 import logging
-from datetime import datetime
-from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
+import threading
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+from databricks.sdk.service.sql import Format, Disposition
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,30 +23,229 @@ if not os.path.exists(DIST_FOLDER):
 app = Flask(__name__, static_folder="dist", static_url_path="")
 CORS(app)
 
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
-SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
-WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-ANALYSIS_TABLE = f"{CATALOG}.{SCHEMA}.analysis_outputs"
-ENCOUNTERS_TABLE = f"{CATALOG}.{SCHEMA}.dim_encounters"
-DRUG_COSTS_TABLE = f"{CATALOG}.{SCHEMA}.fact_drug_costs"
-ED_WAIT_TABLE = f"{CATALOG}.{SCHEMA}.fact_ed_wait_times"
-STAFFING_TABLE = f"{CATALOG}.{SCHEMA}.fact_staffing"
-KPI_TABLE = f"{CATALOG}.{SCHEMA}.fact_operational_kpis"
+from agent.config import (
+    CATALOG, SCHEMA, WAREHOUSE_ID,
+    ANALYSIS_TABLE, ENCOUNTERS_TABLE, DRUG_COSTS_TABLE,
+    ED_WAIT_TABLE, STAFFING_TABLE,
+    get_workspace_client, validate_config,
+)
 
-_workspace_client = None
 _agent_loaded = False
 _invoke_agent = None
 _invoke_deep_streaming = None
 _get_autonomous = None
 _start_autonomous = None
 
+_health_score_history = []
+_autonomous_latest_result = {"timestamp": None, "message": None, "issues_found": None}
+_deep_tasks = {}  # task_id -> {"status","stage","response","tool_calls","routing_trace","error","created"}
 
-def get_workspace_client():
-    global _workspace_client
-    if _workspace_client is None:
-        from databricks.sdk import WorkspaceClient
-        _workspace_client = WorkspaceClient()
-    return _workspace_client
+validate_config()
+logger.info("=" * 60)
+logger.info("STARTUP CONFIG:")
+logger.info(f"  CATALOG       = {CATALOG!r}")
+logger.info(f"  SCHEMA        = {SCHEMA!r}")
+logger.info(f"  WAREHOUSE_ID  = {WAREHOUSE_ID!r}")
+logger.info(f"  ENCOUNTERS    = {ENCOUNTERS_TABLE!r}")
+logger.info(f"  DRUG_COSTS    = {DRUG_COSTS_TABLE!r}")
+logger.info(f"  STAFFING      = {STAFFING_TABLE!r}")
+logger.info(f"  ED_WAIT       = {ED_WAIT_TABLE!r}")
+logger.info(f"  ANALYSIS      = {ANALYSIS_TABLE!r}")
+if not WAREHOUSE_ID:
+    logger.error("WAREHOUSE_ID is EMPTY -- all SQL queries will fail!")
+logger.info("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# SQL helpers -- force JSON_ARRAY format so data_array is always populated
+# ---------------------------------------------------------------------------
+
+def _run_sql(query, w=None):
+    """Execute a SELECT query and return (columns, rows). Always uses JSON_ARRAY + INLINE."""
+    if not w:
+        w = get_workspace_client()
+    r = w.statement_execution.execute_statement(
+        warehouse_id=WAREHOUSE_ID,
+        statement=query,
+        wait_timeout="30s",
+        format=Format.JSON_ARRAY,
+        disposition=Disposition.INLINE,
+    )
+    state = r.status.state.value if r.status and r.status.state else "UNKNOWN"
+    if state not in ("SUCCEEDED", "CLOSED"):
+        err = r.status.error if r.status else None
+        logger.warning(f"SQL state={state}, error={err}, query={query[:120]}")
+        return [], []
+    if r.result and r.result.data_array:
+        cols = [c.name for c in r.manifest.schema.columns]
+        return cols, r.result.data_array
+    return [], []
+
+
+def _exec_sql(query, w=None):
+    """Execute a write SQL statement (INSERT/UPDATE/DDL). Raises on failure."""
+    if not w:
+        w = get_workspace_client()
+    r = w.statement_execution.execute_statement(
+        warehouse_id=WAREHOUSE_ID,
+        statement=query,
+        wait_timeout="30s",
+    )
+    state = r.status.state.value if r.status and r.status.state else "UNKNOWN"
+    if state not in ("SUCCEEDED", "CLOSED"):
+        raise RuntimeError(f"SQL failed (state={state}): {r.status.error}")
+
+
+# ---------------------------------------------------------------------------
+# Startup initialization
+# ---------------------------------------------------------------------------
+
+def _ensure_analysis_table():
+    """Create analysis_outputs table if it doesn't exist."""
+    if not WAREHOUSE_ID or not CATALOG:
+        return
+    try:
+        ddl = f"""CREATE TABLE IF NOT EXISTS {ANALYSIS_TABLE} (
+            id STRING COMMENT 'Unique analysis ID',
+            encounter_id STRING COMMENT 'Related encounter ID',
+            analysis_type STRING COMMENT 'Type of analysis',
+            insights STRING COMMENT 'Main findings',
+            recommendations STRING COMMENT 'Actionable recommendations',
+            created_at TIMESTAMP COMMENT 'When created',
+            agent_mode STRING COMMENT 'quick or deep',
+            metadata MAP<STRING, STRING> COMMENT 'Additional metadata',
+            priority STRING COMMENT 'critical/high/medium/low',
+            status STRING COMMENT 'pending/approved/rejected',
+            reviewed_by STRING COMMENT 'Who reviewed',
+            reviewed_at TIMESTAMP COMMENT 'When reviewed',
+            engineer_notes STRING COMMENT 'Reviewer notes'
+        ) USING DELTA"""
+        _exec_sql(ddl)
+        logger.info(f"INIT: analysis_outputs table ensured at {ANALYSIS_TABLE}")
+    except Exception as e:
+        logger.warning(f"INIT: Could not ensure analysis_outputs table: {e}")
+
+
+def _shift_data_dates_if_stale():
+    """If the most recent encounter is older than 7 days, shift ALL table dates forward so data stays fresh."""
+    if not WAREHOUSE_ID or not CATALOG:
+        return
+    try:
+        cols, rows = _run_sql(f"SELECT DATEDIFF(CURRENT_DATE, MAX(DATE(admit_date))) as stale_days FROM {ENCOUNTERS_TABLE}")
+        stale_days = int(rows[0][0] or 0) if rows and rows[0][0] else 0
+        if stale_days <= 3:
+            logger.info(f"SEED: Data is fresh (most recent encounter {stale_days} days ago)")
+            return
+        shift = stale_days - 1
+        logger.info(f"SEED: Data is {stale_days} days stale -- shifting all dates forward by {shift} days")
+        _exec_sql(f"UPDATE {ENCOUNTERS_TABLE} SET admit_date = DATE_ADD(admit_date, {shift}), discharge_date = DATE_ADD(discharge_date, {shift})")
+        _exec_sql(f"UPDATE {ED_WAIT_TABLE} SET arrival_time = arrival_time + INTERVAL {shift} DAYS")
+        _exec_sql(f"UPDATE {DRUG_COSTS_TABLE} SET date = DATE_ADD(date, {shift})")
+        _exec_sql(f"UPDATE {STAFFING_TABLE} SET date = DATE_ADD(date, {shift})")
+        logger.info(f"SEED: Shifted all table dates forward by {shift} days")
+    except Exception as e:
+        logger.warning(f"SEED: Date shift failed (non-fatal): {e}")
+
+
+def _seed_baseline_if_needed():
+    """On startup, seed baseline demo data across all tables if no recent data exists."""
+    if not WAREHOUSE_ID or not CATALOG:
+        logger.warning("SEED: Skipping -- WAREHOUSE_ID or CATALOG not configured")
+        return
+    try:
+        import random
+
+        _shift_data_dates_if_stale()
+
+        cols, rows = _run_sql(
+            f"SELECT COUNT(*) FROM {ENCOUNTERS_TABLE} WHERE admit_date >= CURRENT_DATE - INTERVAL 30 DAYS"
+        )
+        count = int(rows[0][0] or 0) if rows else 0
+
+        if count >= 20:
+            logger.info(f"SEED: {count} recent encounters found, skipping seed")
+            return
+
+        logger.info("SEED: No recent encounters -- seeding baseline demo data")
+        now = datetime.utcnow()
+        hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
+        depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology", "Pediatrics", "Emergency"]
+        payers = ["BlueCross", "Medicare", "Aetna", "UnitedHealth", "Cigna"]
+        drug_cats = ["Antibiotics", "Analgesics", "Cardiovascular", "Oncology", "Respiratory"]
+        drug_names = ["Amoxicillin", "Ibuprofen", "Lisinopril", "Metformin", "Atorvastatin",
+                      "Omeprazole", "Amlodipine", "Albuterol", "Gabapentin", "Losartan"]
+        staff_types = ["full_time", "contract"]
+
+        enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
+
+        for i in range(50):
+            days_ago = random.randint(0, 29)
+            los = round(random.uniform(1.5, 8.0), 1)
+            is_readmit = random.random() < 0.08
+            hosp = random.choice(hospitals)
+            dept = random.choice(depts)
+            admit = (now - timedelta(days=days_ago + los)).strftime("%Y-%m-%d")
+            discharge = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            eid = f"SEED_{int(now.timestamp())}_{i:03d}"
+
+            enc_rows.append(
+                f"('{eid}', 'PAT_SEED_{i}', '{hosp}', '{dept}', '{random.choice(payers)}', "
+                f"'{admit}', '{discharge}', {los}, {str(is_readmit).lower()}, 'Dr. Baseline')"
+            )
+
+            if random.random() < 0.6:
+                acuity = random.randint(1, 5)
+                wait = round(random.uniform(5, 90 if acuity > 2 else 30), 1)
+                arrival = (now - timedelta(days=days_ago, hours=random.randint(0, 23))).strftime("%Y-%m-%d %H:%M:%S")
+                ed_rows.append(f"('{eid}', '{hosp}', {acuity}, {wait}, TIMESTAMP'{arrival}')")
+
+            for _ in range(random.randint(1, 3)):
+                drug = random.choice(drug_names)
+                cat = random.choice(drug_cats)
+                qty = random.randint(1, 30)
+                unit_cost = round(random.uniform(5, 200), 2)
+                total = round(qty * unit_cost, 2)
+                odate = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                drug_rows.append(f"('{eid}', '{drug}', '{cat}', {qty}, {unit_cost}, {total}, '{odate}')")
+
+        for week in range(4):
+            rdate = (now - timedelta(weeks=week)).strftime("%Y-%m-%d")
+            for dept in depts:
+                for st in staff_types:
+                    fte = round(random.uniform(5, 30), 1)
+                    staff_rows.append(f"('{random.choice(hospitals)}', '{dept}', '{st}', {fte}, '{rdate}')")
+
+        stmts = []
+        if enc_rows:
+            stmts.append(
+                f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, "
+                f"admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES {', '.join(enc_rows)}"
+            )
+        if ed_rows:
+            stmts.append(
+                f"INSERT INTO {ED_WAIT_TABLE} (encounter_id, hospital, acuity_level, wait_minutes, arrival_time) VALUES {', '.join(ed_rows)}"
+            )
+        if drug_rows:
+            stmts.append(
+                f"INSERT INTO {DRUG_COSTS_TABLE} (encounter_id, drug_name, drug_category, quantity, unit_cost, total_cost, date) VALUES {', '.join(drug_rows)}"
+            )
+        if staff_rows:
+            stmts.append(
+                f"INSERT INTO {STAFFING_TABLE} (hospital, department, staff_type, fte_count, date) VALUES {', '.join(staff_rows)}"
+            )
+
+        for stmt in stmts:
+            _exec_sql(stmt)
+
+        logger.info(f"SEED: Inserted {len(enc_rows)} encounters, {len(ed_rows)} ED waits, "
+                     f"{len(drug_rows)} drug costs, {len(staff_rows)} staffing rows")
+    except Exception as e:
+        logger.warning(f"SEED: Failed to seed baseline data: {e}")
+
+
+# Run startup initialization
+_ensure_analysis_table()
+_seed_baseline_if_needed()
 
 
 def load_agent():
@@ -104,34 +306,68 @@ def agent_chat():
             return jsonify({"error": "No message provided"}), 400
 
         if stream and mode == "rag":
-            return _stream_deep_analysis(message, history)
+            return _start_deep_task(message, history)
 
         result = _invoke_agent(message=message, mode=mode, history=history)
-        return jsonify({"response": result.get("response", ""), "tool_calls": result.get("tool_calls", []),
-                        "mode": result.get("mode", mode), "timestamp": datetime.utcnow().isoformat()})
+        resp = {"response": result.get("response", ""), "tool_calls": result.get("tool_calls", []),
+                "mode": result.get("mode", mode), "timestamp": datetime.utcnow().isoformat()}
+        if result.get("intent"):
+            resp["intent"] = result["intent"]
+        return jsonify(resp)
     except Exception as e:
         logger.error(f"Agent chat error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
-def _stream_deep_analysis(message, history):
-    """SSE streaming response for deep analysis mode with keepalive heartbeat."""
+def _start_deep_task(message, history):
+    """Submit deep analysis as a background task, return task_id for polling."""
+    task_id = str(uuid.uuid4())[:12]
+    _deep_tasks[task_id] = {"status": "running", "stage": "starting", "created": time.time()}
+
     progress_queue = _invoke_deep_streaming(message=message, history=history)
 
-    def generate():
-        start = time.time()
-        while time.time() - start < 300:
-            try:
-                event = progress_queue.get(timeout=5)
-                yield f"data: {json.dumps(event)}\n\n"
-                if event.get("stage") in ("done", "error"):
+    def _monitor():
+        try:
+            while True:
+                try:
+                    event = progress_queue.get(timeout=300)
+                except queue.Empty:
+                    _deep_tasks[task_id] = {**_deep_tasks[task_id], "status": "error", "error": "Analysis timed out after 5 minutes."}
                     return
-            except queue.Empty:
-                yield ": keepalive\n\n"
-        yield f"data: {json.dumps({'stage': 'error', 'message': 'Analysis timed out after 5 minutes.'})}\n\n"
+                if event.get("stage") == "done":
+                    _deep_tasks[task_id] = {
+                        "status": "done", "stage": "done",
+                        "response": event.get("response", ""),
+                        "tool_calls": event.get("tool_calls", []),
+                        "routing_trace": event.get("routing_trace"),
+                        "created": _deep_tasks[task_id]["created"],
+                    }
+                    return
+                if event.get("stage") == "error":
+                    _deep_tasks[task_id] = {**_deep_tasks[task_id], "status": "error", "error": event.get("message", "Unknown error")}
+                    return
+                _deep_tasks[task_id]["stage"] = event.get("stage", "running")
+        except Exception as e:
+            logger.error(f"Deep task monitor error: {e}", exc_info=True)
+            _deep_tasks[task_id] = {**_deep_tasks[task_id], "status": "error", "error": str(e)}
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    threading.Thread(target=_monitor, daemon=True).start()
+
+    # Clean up tasks older than 10 minutes
+    cutoff = time.time() - 600
+    for tid in list(_deep_tasks):
+        if _deep_tasks.get(tid, {}).get("created", 0) < cutoff:
+            _deep_tasks.pop(tid, None)
+
+    return jsonify({"task_id": task_id})
+
+
+@app.route("/api/agent/task/<task_id>", methods=["GET"])
+def get_deep_task(task_id):
+    task = _deep_tasks.get(task_id)
+    if not task:
+        return jsonify({"status": "error", "error": "Task not found"}), 404
+    return jsonify(task)
 
 
 # Autonomous mode endpoints
@@ -196,12 +432,18 @@ def autonomous_trigger():
 
 @app.route("/api/autonomous/check-now", methods=["POST"])
 def autonomous_check_now():
-    """Trigger an immediate health check (and NBA if issues found)."""
+    """Trigger an immediate health check (and action report if issues found)."""
     if not load_agent():
         return jsonify({"error": "Agent not available"}), 503
     try:
-        import threading
-        threading.Thread(target=_get_autonomous()._autonomous_job, daemon=True).start()
+        def _run_and_record():
+            auto = _get_autonomous()
+            auto._autonomous_job()
+            last = auto.get_status()
+            msg = last.get("last_result", "Check complete")
+            issues = "issue" in str(msg).lower() or "breach" in str(msg).lower()
+            record_autonomous_result(str(msg)[:200], issues)
+        threading.Thread(target=_run_and_record, daemon=True).start()
         return jsonify({"success": True, "message": "Health check triggered"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -209,32 +451,48 @@ def autonomous_check_now():
 
 @app.route("/api/data/inject-anomaly", methods=["POST"])
 def inject_anomaly():
-    """Insert anomalous encounters for demo/testing -- high LOS, high cost readmissions."""
+    """Insert anomalous data across all tables -- high LOS, high costs, long ED waits, high contract labor."""
     try:
-        w = get_workspace_client()
         import random
-        from datetime import timedelta
         ts = int(datetime.utcnow().timestamp())
-        rows = []
+        now = datetime.utcnow()
         hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
         depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology"]
-        for i in range(10):
+        enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
+
+        for i in range(30):
             eid = f"ANOM_{ts}_{i:03d}"
             hosp = random.choice(hospitals)
             dept = random.choice(depts)
             los = random.randint(10, 25)
-            admit = (datetime.utcnow() - timedelta(days=los)).strftime("%Y-%m-%d")
-            discharge = datetime.utcnow().strftime("%Y-%m-%d")
-            rows.append(
+            days_ago = random.randint(0, 6)
+            admit = (now - timedelta(days=days_ago + los)).strftime("%Y-%m-%d")
+            discharge = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            enc_rows.append(
                 f"('{eid}', 'PAT_{ts}_{i}', '{hosp}', '{dept}', 'Medicare', "
-                f"'{admit}', '{discharge}', {los}, true, 'Dr. Demo')"
-            )
-        insert_sql = f"""INSERT INTO {ENCOUNTERS_TABLE}
-            (encounter_id, patient_id, hospital, department, payer,
-             admit_date, discharge_date, los_days, is_readmission, attending_physician)
-            VALUES {', '.join(rows)}"""
-        w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=insert_sql, wait_timeout="30s")
-        return jsonify({"success": True, "injected": len(rows)})
+                f"'{admit}', '{discharge}', {los}, true, 'Dr. Demo')")
+            acuity = random.randint(1, 4)
+            wait = round(random.uniform(70, 120), 1)
+            arrival = (now - timedelta(days=days_ago, hours=random.randint(0, 12))).strftime("%Y-%m-%d %H:%M:%S")
+            ed_rows.append(f"('{eid}', '{hosp}', {acuity}, {wait}, TIMESTAMP'{arrival}')")
+            for cat, drug, cost in [("Biologics", "Infliximab", random.uniform(800, 2500)),
+                                     ("Specialty", "Pembrolizumab", random.uniform(1200, 4000)),
+                                     ("Oncology", "Trastuzumab", random.uniform(600, 1800))]:
+                d = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                drug_rows.append(f"('{eid}', '{drug}', '{cat}', {random.randint(1,5)}, {round(cost,2)}, {round(cost*random.randint(1,3),2)}, '{d}')")
+
+        for dept in depts:
+            for hosp in hospitals:
+                d = now.strftime("%Y-%m-%d")
+                staff_rows.append(f"('{hosp}', '{dept}', 'contract', {round(random.uniform(20, 40), 1)}, '{d}')")
+                staff_rows.append(f"('{hosp}', '{dept}', 'full_time', {round(random.uniform(5, 15), 1)}, '{d}')")
+
+        _exec_sql(f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES {', '.join(enc_rows)}")
+        _exec_sql(f"INSERT INTO {ED_WAIT_TABLE} (encounter_id, hospital, acuity_level, wait_minutes, arrival_time) VALUES {', '.join(ed_rows)}")
+        _exec_sql(f"INSERT INTO {DRUG_COSTS_TABLE} (encounter_id, drug_name, drug_category, quantity, unit_cost, total_cost, date) VALUES {', '.join(drug_rows)}")
+        _exec_sql(f"INSERT INTO {STAFFING_TABLE} (hospital, department, staff_type, fte_count, date) VALUES {', '.join(staff_rows)}")
+        total = len(enc_rows) + len(ed_rows) + len(drug_rows) + len(staff_rows)
+        return jsonify({"success": True, "injected": total, "encounters": len(enc_rows)})
     except Exception as e:
         logger.error(f"Inject anomaly error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -242,34 +500,67 @@ def inject_anomaly():
 
 @app.route("/api/data/inject-good", methods=["POST"])
 def inject_good_data():
-    """Insert healthy encounters -- short LOS, no readmissions."""
+    """Insert healthy data across all tables -- short LOS, low costs, fast ED, low contract labor."""
     try:
-        w = get_workspace_client()
         import random
-        from datetime import timedelta
         ts = int(datetime.utcnow().timestamp())
-        rows = []
+        now = datetime.utcnow()
         hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
         depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology", "Pediatrics"]
-        for i in range(10):
+        enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
+
+        for i in range(30):
             eid = f"GOOD_{ts}_{i:03d}"
             hosp = random.choice(hospitals)
             dept = random.choice(depts)
-            los = random.randint(1, 3)
-            admit = (datetime.utcnow() - timedelta(days=los)).strftime("%Y-%m-%d")
-            discharge = datetime.utcnow().strftime("%Y-%m-%d")
-            rows.append(
+            los = round(random.uniform(1, 3.5), 1)
+            days_ago = random.randint(0, 6)
+            admit = (now - timedelta(days=days_ago + los)).strftime("%Y-%m-%d")
+            discharge = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            enc_rows.append(
                 f"('{eid}', 'PAT_{ts}_{i}', '{hosp}', '{dept}', 'BlueCross', "
-                f"'{admit}', '{discharge}', {los}, false, 'Dr. Good')"
-            )
-        insert_sql = f"""INSERT INTO {ENCOUNTERS_TABLE}
-            (encounter_id, patient_id, hospital, department, payer,
-             admit_date, discharge_date, los_days, is_readmission, attending_physician)
-            VALUES {', '.join(rows)}"""
-        w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=insert_sql, wait_timeout="30s")
-        return jsonify({"success": True, "injected": len(rows)})
+                f"'{admit}', '{discharge}', {los}, false, 'Dr. Good')")
+            acuity = random.randint(2, 5)
+            wait = round(random.uniform(8, 25), 1)
+            arrival = (now - timedelta(days=days_ago, hours=random.randint(0, 12))).strftime("%Y-%m-%d %H:%M:%S")
+            ed_rows.append(f"('{eid}', '{hosp}', {acuity}, {wait}, TIMESTAMP'{arrival}')")
+            for cat, drug, cost in [("Analgesics", "Ibuprofen", random.uniform(5, 30)),
+                                     ("Antibiotics", "Amoxicillin", random.uniform(10, 50))]:
+                d = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                drug_rows.append(f"('{eid}', '{drug}', '{cat}', {random.randint(1,10)}, {round(cost,2)}, {round(cost*random.randint(1,2),2)}, '{d}')")
+
+        for dept in depts:
+            for hosp in hospitals:
+                d = now.strftime("%Y-%m-%d")
+                staff_rows.append(f"('{hosp}', '{dept}', 'full_time', {round(random.uniform(25, 45), 1)}, '{d}')")
+                staff_rows.append(f"('{hosp}', '{dept}', 'contract', {round(random.uniform(2, 8), 1)}, '{d}')")
+
+        _exec_sql(f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES {', '.join(enc_rows)}")
+        _exec_sql(f"INSERT INTO {ED_WAIT_TABLE} (encounter_id, hospital, acuity_level, wait_minutes, arrival_time) VALUES {', '.join(ed_rows)}")
+        _exec_sql(f"INSERT INTO {DRUG_COSTS_TABLE} (encounter_id, drug_name, drug_category, quantity, unit_cost, total_cost, date) VALUES {', '.join(drug_rows)}")
+        _exec_sql(f"INSERT INTO {STAFFING_TABLE} (hospital, department, staff_type, fte_count, date) VALUES {', '.join(staff_rows)}")
+        total = len(enc_rows) + len(ed_rows) + len(drug_rows) + len(staff_rows)
+        return jsonify({"success": True, "injected": total, "encounters": len(enc_rows)})
     except Exception as e:
         logger.error(f"Inject good data error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/reset", methods=["POST"])
+def reset_demo_data():
+    """Delete all injected (GOOD_/ANOM_) data and clear analysis_outputs."""
+    try:
+        _exec_sql(f"DELETE FROM {ENCOUNTERS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
+        _exec_sql(f"DELETE FROM {ED_WAIT_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
+        _exec_sql(f"DELETE FROM {DRUG_COSTS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
+        _exec_sql(f"DELETE FROM {STAFFING_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 7 DAYS AND hospital IN ('Hospital_A','Hospital_B','Hospital_C')")
+        try:
+            _exec_sql(f"DELETE FROM {ANALYSIS_TABLE} WHERE 1=1")
+        except Exception:
+            pass
+        return jsonify({"success": True, "message": "Injected data and analysis cleared"})
+    except Exception as e:
+        logger.error(f"Reset data error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -292,49 +583,31 @@ def heartbeat_stop():
 def get_health_score():
     try:
         w = get_workspace_client()
-        # Average LOS (lower is better, target < 5)
         los_query = f"SELECT AVG(los_days) as avg_los FROM {ENCOUNTERS_TABLE} WHERE admit_date > CURRENT_TIMESTAMP - INTERVAL 30 DAYS"
-        # ED wait breaches
         ed_query = f"SELECT COUNT(*) as breach_count FROM {ED_WAIT_TABLE} WHERE wait_minutes > 60 AND arrival_time > CURRENT_TIMESTAMP - INTERVAL 7 DAYS"
-        # Readmission rate
-        readmit_query = f"""
-        SELECT ROUND(SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as readmit_rate
-        FROM {ENCOUNTERS_TABLE}
-        """
-        los_result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=los_query, wait_timeout="30s")
-        ed_result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=ed_query, wait_timeout="30s")
-        readmit_result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=readmit_query, wait_timeout="30s")
+        readmit_query = f"SELECT ROUND(SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as readmit_rate FROM {ENCOUNTERS_TABLE}"
 
-        avg_los = 4.5
-        if los_result.result and los_result.result.data_array:
-            val = los_result.result.data_array[0][0]
-            avg_los = float(val) if val else 4.5
+        _, los_rows = _run_sql(los_query, w)
+        _, ed_rows = _run_sql(ed_query, w)
+        _, readmit_rows = _run_sql(readmit_query, w)
 
-        ed_breaches = 0
-        if ed_result.result and ed_result.result.data_array:
-            val = ed_result.result.data_array[0][0]
-            ed_breaches = int(val) if val else 0
+        avg_los = float(los_rows[0][0]) if los_rows and los_rows[0][0] else None
+        ed_breaches = int(ed_rows[0][0]) if ed_rows and ed_rows[0][0] else 0
+        readmit_rate = float(readmit_rows[0][0]) if readmit_rows and readmit_rows[0][0] else None
 
-        readmit_rate = 8.0
-        if readmit_result.result and readmit_result.result.data_array:
-            val = readmit_result.result.data_array[0][0]
-            readmit_rate = float(val) if val else 8.0
+        _, enc_rows = _run_sql(f"SELECT COUNT(*) FROM {ENCOUNTERS_TABLE}", w)
+        total_encounters = int(enc_rows[0][0] or 0) if enc_rows else 0
 
-        # Health score: target LOS<5, readmit<10%, few ED breaches
+        if total_encounters == 0 or avg_los is None:
+            return jsonify({"score": None, "avg_los": 0, "readmission_rate": 0, "ed_breaches": 0,
+                            "total_encounters": total_encounters,
+                            "summary": "No encounter data available. Run generate_data or use Inject buttons."})
+
+        r_rate = readmit_rate or 0.0
         los_score = max(0, min(40, 40 - (avg_los - 4.0) * 10))
-        readmit_score = max(0, min(30, 30 - (readmit_rate - 5.0) * 3))
+        readmit_score = max(0, min(30, 30 - (r_rate - 5.0) * 3))
         ed_score = max(0, min(30, 30 - ed_breaches * 0.5))
-        health_score = int(los_score + readmit_score + ed_score)
-        health_score = max(0, min(100, health_score))
-
-        total_encounters = 0
-        try:
-            enc_result = w.statement_execution.execute_statement(
-                warehouse_id=WAREHOUSE_ID, statement=f"SELECT COUNT(*) FROM {ENCOUNTERS_TABLE}", wait_timeout="30s")
-            if enc_result.result and enc_result.result.data_array:
-                total_encounters = int(enc_result.result.data_array[0][0] or 0)
-        except:
-            pass
+        health_score = max(0, min(100, int(los_score + readmit_score + ed_score)))
 
         summary = f"{total_encounters} encounters tracked, avg LOS {avg_los:.1f} days. "
         if health_score >= 80:
@@ -344,7 +617,11 @@ def get_health_score():
         else:
             summary += "Critical issues detected."
 
-        return jsonify({"score": health_score, "avg_los": round(avg_los, 1), "readmission_rate": round(readmit_rate, 1),
+        _health_score_history.append({"score": health_score, "ts": datetime.utcnow().isoformat()})
+        if len(_health_score_history) > 50:
+            _health_score_history[:] = _health_score_history[-50:]
+
+        return jsonify({"score": health_score, "avg_los": round(avg_los, 1), "readmission_rate": round(r_rate, 1),
                         "ed_breaches": ed_breaches, "total_encounters": total_encounters, "summary": summary})
     except Exception as e:
         logger.error(f"Health score error: {e}", exc_info=True)
@@ -355,7 +632,6 @@ def get_health_score():
 def get_alerts():
     try:
         w = get_workspace_client()
-        # High LOS alerts
         query = f"""
         SELECT hospital, department, ROUND(AVG(los_days), 1) as avg_los, COUNT(*) as enc_count
         FROM {ENCOUNTERS_TABLE}
@@ -364,12 +640,11 @@ def get_alerts():
         HAVING AVG(los_days) > 6.0
         ORDER BY avg_los DESC LIMIT 5
         """
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         alerts = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data = dict(zip(columns, row))
+        if rows:
+            for row in rows:
+                data = dict(zip(cols, row))
                 avg_los = float(data.get("avg_los", 0) or 0)
                 alerts.append({
                     "id": f"los_{data['hospital']}_{data['department']}",
@@ -392,12 +667,8 @@ def get_latest_analysis():
         where_clause = f"WHERE analysis_type = '{analysis_type}'" if analysis_type else ""
         query = f"""SELECT id, encounter_id, analysis_type, insights, recommendations, created_at, agent_mode
         FROM {ANALYSIS_TABLE} {where_clause} ORDER BY created_at DESC LIMIT {limit}"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        analyses = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                analyses.append(dict(zip(columns, row)))
+        cols, rows = _run_sql(query, w)
+        analyses = [dict(zip(cols, row)) for row in rows]
         return jsonify({"analyses": analyses, "count": len(analyses)})
     except Exception as e:
         return jsonify({"error": str(e), "analyses": []}), 200
@@ -412,12 +683,8 @@ def get_pending_recommendations():
         FROM {ANALYSIS_TABLE} WHERE status = 'pending' AND recommendations IS NOT NULL
         ORDER BY CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
         created_at DESC LIMIT {limit}"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        recommendations = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                recommendations.append(dict(zip(columns, row)))
+        cols, rows = _run_sql(query, w)
+        recommendations = [dict(zip(cols, row)) for row in rows]
         return jsonify({"recommendations": recommendations})
     except Exception as e:
         return jsonify({"error": str(e), "recommendations": []}), 200
@@ -429,13 +696,10 @@ def approve_recommendation(rec_id):
         data = request.json or {}
         reviewed_by = data.get("reviewed_by", "unknown")
         engineer_notes = data.get("engineer_notes", "")
-        w = get_workspace_client()
         query = f"""UPDATE {ANALYSIS_TABLE} SET status = 'approved', reviewed_by = '{reviewed_by}',
         reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes.replace("'", "''")}' WHERE id = '{rec_id}'"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        if result.status.state.value in ["SUCCEEDED", "CLOSED"]:
-            return jsonify({"success": True, "id": rec_id, "status": "approved"})
-        return jsonify({"error": f"Update failed: {result.status.error}"}), 500
+        _exec_sql(query)
+        return jsonify({"success": True, "id": rec_id, "status": "approved"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -446,13 +710,10 @@ def reject_recommendation(rec_id):
         data = request.json or {}
         reviewed_by = data.get("reviewed_by", "unknown")
         engineer_notes = data.get("engineer_notes", "")
-        w = get_workspace_client()
         query = f"""UPDATE {ANALYSIS_TABLE} SET status = 'rejected', reviewed_by = '{reviewed_by}',
         reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes.replace("'", "''")}' WHERE id = '{rec_id}'"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        if result.status.state.value in ["SUCCEEDED", "CLOSED"]:
-            return jsonify({"success": True, "id": rec_id, "status": "rejected"})
-        return jsonify({"error": f"Update failed: {result.status.error}"}), 500
+        _exec_sql(query)
+        return jsonify({"success": True, "id": rec_id, "status": "rejected"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -463,12 +724,11 @@ def export_recommendation_pdf(rec_id):
         w = get_workspace_client()
         query = f"""SELECT id, encounter_id, analysis_type, insights, recommendations, created_at, priority, status
         FROM {ANALYSIS_TABLE} WHERE id = '{rec_id}'"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            rec = dict(zip(columns, result.result.data_array[0]))
+        cols, rows = _run_sql(query, w)
+        if rows:
+            rec = dict(zip(cols, rows[0]))
             report = f"""
-NEXT BEST ACTION REPORT
+RECOMMENDED ACTIONS REPORT
 {'='*60}
 
 Recommendation ID: {rec['id']}
@@ -512,18 +772,16 @@ def get_ed_summary():
         FROM {ED_WAIT_TABLE}
         WHERE arrival_time >= CURRENT_TIMESTAMP - INTERVAL 30 DAYS
         GROUP BY acuity_level ORDER BY acuity_level"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         levels = []
         total_breaches = 0
-        if result.result and result.result.data_array:
-            cols = [c.name for c in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                d = dict(zip(cols, row))
-                b = int(d.get("breaches") or 0)
-                total_breaches += b
-                levels.append({"acuity": int(d.get("acuity_level", 0)),
-                               "avg_wait": float(d.get("avg_wait") or 0),
-                               "total": int(d.get("total") or 0), "breaches": b})
+        for row in rows:
+            d = dict(zip(cols, row))
+            b = int(d.get("breaches") or 0)
+            total_breaches += b
+            levels.append({"acuity": int(d.get("acuity_level", 0)),
+                           "avg_wait": float(d.get("avg_wait") or 0),
+                           "total": int(d.get("total") or 0), "breaches": b})
         return jsonify({"levels": levels, "total_breaches": total_breaches})
     except Exception as e:
         return jsonify({"error": str(e), "levels": [], "total_breaches": 0}), 200
@@ -533,21 +791,17 @@ def get_ed_summary():
 def get_drugs_summary():
     try:
         w = get_workspace_client()
-        total_q = f"SELECT ROUND(SUM(total_cost), 2) as total_spend FROM {DRUG_COSTS_TABLE} WHERE order_date >= CURRENT_DATE - INTERVAL 30 DAYS"
+        total_q = f"SELECT ROUND(SUM(total_cost), 2) as total_spend FROM {DRUG_COSTS_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 30 DAYS"
         cat_q = f"""SELECT drug_category, ROUND(SUM(total_cost), 2) as spend
-            FROM {DRUG_COSTS_TABLE} WHERE order_date >= CURRENT_DATE - INTERVAL 30 DAYS
+            FROM {DRUG_COSTS_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 30 DAYS
             GROUP BY drug_category ORDER BY spend DESC LIMIT 3"""
-        total_r = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=total_q, wait_timeout="30s")
-        cat_r = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=cat_q, wait_timeout="30s")
-        total_spend = 0
-        if total_r.result and total_r.result.data_array:
-            total_spend = float(total_r.result.data_array[0][0] or 0)
+        _, total_rows = _run_sql(total_q, w)
+        cat_cols, cat_rows = _run_sql(cat_q, w)
+        total_spend = float(total_rows[0][0] or 0) if total_rows else 0
         categories = []
-        if cat_r.result and cat_r.result.data_array:
-            cols = [c.name for c in cat_r.manifest.schema.columns]
-            for row in cat_r.result.data_array:
-                d = dict(zip(cols, row))
-                categories.append({"category": d.get("drug_category"), "spend": float(d.get("spend") or 0)})
+        for row in cat_rows:
+            d = dict(zip(cat_cols, row))
+            categories.append({"category": d.get("drug_category"), "spend": float(d.get("spend") or 0)})
         return jsonify({"total_spend": total_spend, "categories": categories})
     except Exception as e:
         return jsonify({"error": str(e), "total_spend": 0, "categories": []}), 200
@@ -562,21 +816,19 @@ def get_staffing_summary():
                   NULLIF(SUM(fte_count), 0), 1) as contract_pct,
             SUM(fte_count) as total_fte
         FROM {STAFFING_TABLE}
-        WHERE report_date >= CURRENT_DATE - INTERVAL 30 DAYS
+        WHERE date >= CURRENT_DATE - INTERVAL 30 DAYS
         GROUP BY department ORDER BY contract_pct DESC"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         departments = []
         overall_contract = 0
         overall_total = 0
-        if result.result and result.result.data_array:
-            cols = [c.name for c in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                d = dict(zip(cols, row))
-                pct = float(d.get("contract_pct") or 0)
-                fte = int(d.get("total_fte") or 0)
-                overall_contract += pct * fte / 100
-                overall_total += fte
-                departments.append({"department": d.get("department"), "contract_pct": pct, "total_fte": fte})
+        for row in rows:
+            d = dict(zip(cols, row))
+            pct = float(d.get("contract_pct") or 0)
+            fte = int(d.get("total_fte") or 0)
+            overall_contract += pct * fte / 100
+            overall_total += fte
+            departments.append({"department": d.get("department"), "contract_pct": pct, "total_fte": fte})
         overall_pct = round(overall_contract / overall_total * 100, 1) if overall_total else 0
         return jsonify({"overall_contract_pct": overall_pct, "departments": departments[:5]})
     except Exception as e:
@@ -601,21 +853,18 @@ def get_encounter_summary():
             SUM(CASE WHEN admit_date BETWEEN CURRENT_TIMESTAMP - INTERVAL 14 DAYS AND CURRENT_TIMESTAMP - INTERVAL 7 DAYS THEN 1 ELSE 0 END) as last_week_enc
         FROM {ENCOUNTERS_TABLE}
         WHERE admit_date > CURRENT_TIMESTAMP - INTERVAL 14 DAYS"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         summary = {}
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            row = result.result.data_array[0]
-            summary = dict(zip(columns, row))
+        if rows:
+            summary = dict(zip(cols, rows[0]))
             total = int(summary.get("total_encounters", 0) or 0)
             readmits = int(summary.get("readmissions", 0) or 0)
             summary["readmission_rate"] = round(readmits / total * 100, 1) if total > 0 else 0
         trends = {}
         try:
-            tr = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=trend_query, wait_timeout="30s")
-            if tr.result and tr.result.data_array:
-                cols = [c.name for c in tr.manifest.schema.columns]
-                td = dict(zip(cols, tr.result.data_array[0]))
+            tcols, trows = _run_sql(trend_query, w)
+            if trows:
+                td = dict(zip(tcols, trows[0]))
                 tw_los = float(td.get("this_week_los") or 0)
                 lw_los = float(td.get("last_week_los") or 0)
                 tw_re = int(td.get("this_week_readmits") or 0)
@@ -644,12 +893,8 @@ def get_encounters_by_hospital():
                SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) as readmission_count,
                ROUND(AVG(los_days), 1) as avg_los
         FROM {ENCOUNTERS_TABLE} GROUP BY hospital ORDER BY hospital"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        data = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data.append(dict(zip(columns, row)))
+        cols, rows = _run_sql(query, w)
+        data = [dict(zip(cols, row)) for row in rows]
         return jsonify({"hospital_stats": data})
     except Exception as e:
         return jsonify({"error": str(e), "hospital_stats": []}), 200
@@ -663,12 +908,8 @@ def get_encounters_by_department():
                SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) as readmission_count,
                ROUND(AVG(los_days), 1) as avg_los
         FROM {ENCOUNTERS_TABLE} GROUP BY department ORDER BY encounter_count DESC"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
-        data = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data.append(dict(zip(columns, row)))
+        cols, rows = _run_sql(query, w)
+        data = [dict(zip(cols, row)) for row in rows]
         return jsonify({"department_stats": data})
     except Exception as e:
         return jsonify({"error": str(e), "department_stats": []}), 200
@@ -683,15 +924,13 @@ def get_encounters_timeline():
                SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) as readmission_count
         FROM {ENCOUNTERS_TABLE} WHERE admit_date >= CURRENT_DATE - INTERVAL {days} DAYS
         GROUP BY DATE(admit_date) ORDER BY encounter_date ASC"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         timeline = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data = dict(zip(columns, row))
-                timeline.append({"date": str(data.get("encounter_date")),
-                                 "encounters": int(data.get("encounter_count", 0) or 0),
-                                 "readmissions": int(data.get("readmission_count", 0) or 0)})
+        for row in rows:
+            data = dict(zip(cols, row))
+            timeline.append({"date": str(data.get("encounter_date")),
+                             "encounters": int(data.get("encounter_count", 0) or 0),
+                             "readmissions": int(data.get("readmission_count", 0) or 0)})
         return jsonify({"timeline": timeline, "days": days})
     except Exception as e:
         return jsonify({"error": str(e), "timeline": []}), 200
@@ -712,20 +951,18 @@ def get_readmissions():
         ) d ON e.encounter_id = d.encounter_id
         WHERE e.is_readmission = true
         ORDER BY e.admit_date DESC LIMIT {limit}"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         readmissions = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data = dict(zip(columns, row))
-                readmissions.append({
-                    "encounter_id": data.get("encounter_id"), "hospital": data.get("hospital"),
-                    "department": data.get("department"), "los_days": data.get("los_days"),
-                    "admit_date": str(data.get("admit_date")),
-                    "discharge_date": str(data.get("discharge_date", "")),
-                    "payer": data.get("payer"),
-                    "total_drug_cost": float(data.get("total_drug_cost") or 0),
-                })
+        for row in rows:
+            data = dict(zip(cols, row))
+            readmissions.append({
+                "encounter_id": data.get("encounter_id"), "hospital": data.get("hospital"),
+                "department": data.get("department"), "los_days": data.get("los_days"),
+                "admit_date": str(data.get("admit_date")),
+                "discharge_date": str(data.get("discharge_date", "")),
+                "payer": data.get("payer"),
+                "total_drug_cost": float(data.get("total_drug_cost") or 0),
+            })
         return jsonify({"readmissions": readmissions, "count": len(readmissions)})
     except Exception as e:
         return jsonify({"error": str(e), "readmissions": []}), 200
@@ -739,21 +976,172 @@ def get_recommendations():
         query = f"""SELECT id, encounter_id, analysis_type, insights, recommendations, created_at
         FROM {ANALYSIS_TABLE} WHERE recommendations IS NOT NULL AND recommendations != ''
         ORDER BY created_at DESC LIMIT {limit}"""
-        result = w.statement_execution.execute_statement(warehouse_id=WAREHOUSE_ID, statement=query, wait_timeout="30s")
+        cols, rows = _run_sql(query, w)
         recommendations = []
-        if result.result and result.result.data_array:
-            columns = [col.name for col in result.manifest.schema.columns]
-            for row in result.result.data_array:
-                data = dict(zip(columns, row))
-                recommendations.append({
-                    "id": data.get("id"), "encounter_id": data.get("encounter_id"),
-                    "type": data.get("analysis_type"),
-                    "insight": (data.get("insights", "")[:200] + "...") if len(data.get("insights", "")) > 200 else data.get("insights", ""),
-                    "action": data.get("recommendations"), "created_at": data.get("created_at")
-                })
+        for row in rows:
+            data = dict(zip(cols, row))
+            recommendations.append({
+                "id": data.get("id"), "encounter_id": data.get("encounter_id"),
+                "type": data.get("analysis_type"),
+                "insight": (data.get("insights", "")[:200] + "...") if len(data.get("insights", "")) > 200 else data.get("insights", ""),
+                "action": data.get("recommendations"), "created_at": data.get("created_at"),
+                "timestamp": data.get("created_at"),
+            })
         return jsonify({"recommendations": recommendations, "count": len(recommendations)})
     except Exception as e:
         return jsonify({"error": str(e), "recommendations": []}), 200
+
+
+@app.route("/api/encounters/los-by-dept", methods=["GET"])
+def get_los_by_dept():
+    try:
+        w = get_workspace_client()
+        query = f"""SELECT department, ROUND(AVG(los_days), 1) as avg_los, COUNT(*) as enc_count
+            FROM {ENCOUNTERS_TABLE} WHERE admit_date >= CURRENT_DATE - INTERVAL 30 DAYS
+            GROUP BY department ORDER BY avg_los DESC"""
+        cols, rows = _run_sql(query, w)
+        depts = [dict(zip(cols, row)) for row in rows]
+        for d in depts:
+            d["avg_los"] = float(d.get("avg_los") or 0)
+            d["enc_count"] = int(d.get("enc_count") or 0)
+        return jsonify({"departments": depts})
+    except Exception as e:
+        return jsonify({"error": str(e), "departments": []}), 200
+
+
+@app.route("/api/encounters/payer-mix", methods=["GET"])
+def get_payer_mix():
+    try:
+        w = get_workspace_client()
+        query = f"""SELECT payer, COUNT(*) as enc_count
+            FROM {ENCOUNTERS_TABLE} WHERE admit_date >= CURRENT_DATE - INTERVAL 30 DAYS
+            GROUP BY payer ORDER BY enc_count DESC LIMIT 6"""
+        cols, rows = _run_sql(query, w)
+        payers = [{"payer": r[0], "count": int(r[1] or 0)} for r in rows]
+        return jsonify({"payers": payers})
+    except Exception as e:
+        return jsonify({"error": str(e), "payers": []}), 200
+
+
+@app.route("/api/health/history", methods=["GET"])
+def get_health_history():
+    return jsonify({"history": _health_score_history[-20:]})
+
+
+@app.route("/api/suggestions", methods=["GET"])
+def get_suggestions():
+    """Return context-aware suggested questions based on current data conditions."""
+    suggestions = []
+    try:
+        w = get_workspace_client()
+        _, los_rows = _run_sql(f"SELECT AVG(los_days) FROM {ENCOUNTERS_TABLE} WHERE admit_date > CURRENT_TIMESTAMP - INTERVAL 30 DAYS", w)
+        avg_los = float(los_rows[0][0] or 0) if los_rows and los_rows[0][0] else 0
+        _, re_rows = _run_sql(f"SELECT ROUND(SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END)*100.0/NULLIF(COUNT(*),0),1) FROM {ENCOUNTERS_TABLE}", w)
+        readmit_rate = float(re_rows[0][0] or 0) if re_rows and re_rows[0][0] else 0
+        _, ed_rows = _run_sql(f"SELECT COUNT(*) FROM {ED_WAIT_TABLE} WHERE wait_minutes > 60 AND arrival_time > CURRENT_TIMESTAMP - INTERVAL 7 DAYS", w)
+        ed_breaches = int(ed_rows[0][0] or 0) if ed_rows and ed_rows[0][0] else 0
+        _, contract_rows = _run_sql(f"""SELECT department, ROUND(SUM(CASE WHEN staff_type='contract' THEN fte_count ELSE 0 END)*100.0/NULLIF(SUM(fte_count),0),1) as pct
+            FROM {STAFFING_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 30 DAYS GROUP BY department HAVING pct > 30 ORDER BY pct DESC LIMIT 1""", w)
+        high_contract_dept = contract_rows[0][0] if contract_rows else None
+
+        if readmit_rate > 10:
+            suggestions.append({"label": f"Why is readmission at {readmit_rate}%?", "query": f"What's driving the {readmit_rate}% readmission rate and what can we do about it?"})
+        if avg_los > 5:
+            suggestions.append({"label": f"LOS is {avg_los:.1f}d -- how to reduce?", "query": f"Average LOS is {avg_los:.1f} days, above the 5-day target. What specific actions can reduce it?"})
+        if ed_breaches > 3:
+            suggestions.append({"label": f"{ed_breaches} ED wait breaches", "query": f"We have {ed_breaches} ED wait time breaches this week. What's causing them and how do we fix it?"})
+        if high_contract_dept:
+            suggestions.append({"label": f"High contract labor in {high_contract_dept}", "query": f"Why is contract labor high in {high_contract_dept} and how can we reduce it?"})
+        _, cost_rows = _run_sql(f"SELECT ROUND(SUM(total_cost),0) FROM {DRUG_COSTS_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 7 DAYS", w)
+        week_cost = float(cost_rows[0][0] or 0) if cost_rows and cost_rows[0][0] else 0
+        if week_cost > 50000:
+            suggestions.append({"label": f"Drug spend ${week_cost/1000:.0f}k this week", "query": f"Drug costs are ${week_cost:,.0f} this week. Which categories are driving the increase?"})
+
+        if len(suggestions) < 3:
+            suggestions.append({"label": "Generate next best actions", "query": "Based on current operations data, what are the top 3 next best actions for hospital leadership?"})
+        if len(suggestions) < 4:
+            suggestions.append({"label": "Reduce ED wait times", "query": "How can I reduce wait times in the Emergency Department?"})
+        if len(suggestions) < 5:
+            suggestions.append({"label": "Monday discharge patterns", "query": "Why is LOS higher for patients discharged on Mondays?"})
+    except Exception as e:
+        logger.warning(f"Suggestions error: {e}")
+        suggestions = [
+            {"label": "How to reduce LOS?", "query": "What specific actions can I take to reduce length of stay?"},
+            {"label": "Reduce ED wait times", "query": "How can I reduce wait times in the Emergency Department?"},
+            {"label": "Drug cost analysis", "query": "Why did drug costs spike recently?"},
+        ]
+    return jsonify({"suggestions": suggestions[:5]})
+
+
+@app.route("/api/autonomous/latest-result", methods=["GET"])
+def autonomous_latest_result():
+    return jsonify(_autonomous_latest_result)
+
+
+def record_autonomous_result(message, issues_found):
+    """Called by the autonomous agent after a health check completes."""
+    global _autonomous_latest_result
+    _autonomous_latest_result = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "message": message,
+        "issues_found": issues_found,
+    }
+
+
+@app.route("/api/debug", methods=["GET"])
+def debug_endpoint():
+    """Diagnostic endpoint -- hit in browser to see full config + connectivity report."""
+    results = {"timestamp": datetime.utcnow().isoformat()}
+
+    results["config"] = {
+        "CATALOG": CATALOG, "SCHEMA": SCHEMA, "WAREHOUSE_ID": WAREHOUSE_ID,
+        "ENCOUNTERS_TABLE": ENCOUNTERS_TABLE, "DRUG_COSTS_TABLE": DRUG_COSTS_TABLE,
+        "STAFFING_TABLE": STAFFING_TABLE, "ED_WAIT_TABLE": ED_WAIT_TABLE,
+        "ANALYSIS_TABLE": ANALYSIS_TABLE,
+    }
+
+    tables_to_test = {
+        "dim_encounters": (ENCOUNTERS_TABLE, "SELECT COUNT(*) as cnt, MIN(admit_date) as min_dt, MAX(admit_date) as max_dt FROM {t}"),
+        "fact_drug_costs": (DRUG_COSTS_TABLE, "SELECT COUNT(*) as cnt, MIN(date) as min_dt, MAX(date) as max_dt FROM {t}"),
+        "fact_staffing": (STAFFING_TABLE, "SELECT COUNT(*) as cnt, MIN(date) as min_dt, MAX(date) as max_dt FROM {t}"),
+        "fact_ed_wait_times": (ED_WAIT_TABLE, "SELECT COUNT(*) as cnt, MIN(arrival_time) as min_dt, MAX(arrival_time) as max_dt FROM {t}"),
+        "analysis_outputs": (ANALYSIS_TABLE, "SELECT COUNT(*) as cnt FROM {t}"),
+    }
+
+    if not WAREHOUSE_ID:
+        results["error"] = "WAREHOUSE_ID is empty -- all SQL will fail"
+        return jsonify(results)
+
+    try:
+        w = get_workspace_client()
+        results["workspace_client"] = "OK"
+    except Exception as e:
+        results["workspace_client"] = f"FAILED: {e}"
+        return jsonify(results)
+
+    results["tables"] = {}
+    for name, (table, query_tpl) in tables_to_test.items():
+        query = query_tpl.format(t=table)
+        try:
+            cols, rows = _run_sql(query, w)
+            if rows:
+                row = dict(zip(cols, rows[0]))
+                results["tables"][name] = {"status": "OK", "data": row}
+            else:
+                results["tables"][name] = {"status": "OK", "data": "no rows returned"}
+        except Exception as e:
+            results["tables"][name] = {"status": "FAILED", "error": str(e)}
+
+    try:
+        test_id = f"_DEBUG_TEST_{int(datetime.utcnow().timestamp())}"
+        insert_q = f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES ('{test_id}', 'TEST', 'TEST', 'TEST', 'TEST', '2020-01-01', '2020-01-02', 1, false, 'TEST')"
+        _exec_sql(insert_q)
+        _exec_sql(f"DELETE FROM {ENCOUNTERS_TABLE} WHERE encounter_id = '{test_id}'")
+        results["write_test"] = "OK -- INSERT and DELETE succeeded"
+    except Exception as e:
+        results["write_test"] = f"FAILED: {e}"
+
+    return jsonify(results)
 
 
 if __name__ == "__main__":

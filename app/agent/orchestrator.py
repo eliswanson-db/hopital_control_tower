@@ -1,10 +1,7 @@
 """Pre-agent orchestrator for ChatGPT-style tool selection."""
-import os
 from typing import List, Dict, Any, Optional
+from .config import CATALOG, SCHEMA
 from .tools import execute_sql, search_encounters, search_sops, write_analysis
-
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
-SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
 
 
 def classify_intent(message: str) -> str:
@@ -24,16 +21,17 @@ def classify_intent(message: str) -> str:
     return "general"
 
 
-def select_tools_for_context(message: str, user_context: Optional[Dict[str, Any]] = None) -> List:
+def select_tools_for_context(message: str, user_context: Optional[Dict[str, Any]] = None) -> tuple:
+    """Returns (tools_list, intent_string)."""
     intent = classify_intent(message)
     if intent == "query":
-        return [execute_sql]
+        return [execute_sql], intent
     elif intent == "search":
-        return [search_encounters]
+        return [search_encounters], intent
     elif intent == "analyze":
-        return [execute_sql, search_encounters, search_sops, write_analysis]
+        return [execute_sql, search_encounters, search_sops, write_analysis], intent
     else:
-        return [execute_sql, search_encounters]
+        return [execute_sql, search_encounters], intent
 
 
 def get_system_prompt_for_context(message: str, tools: List, user_context: Optional[Dict[str, Any]] = None) -> str:

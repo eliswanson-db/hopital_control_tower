@@ -2,7 +2,7 @@
 import os
 import random
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, List, Optional, Dict, Any
 from dataclasses import dataclass
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -11,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL = int(os.environ.get("AUTONOMOUS_INTERVAL_SECONDS", "3600"))
+DEFAULT_MAX_RUNTIME = int(os.environ.get("AUTONOMOUS_MAX_RUNTIME_SECONDS", "7200"))
 MIN_INTERVAL = 60
 MAX_INTERVAL = 86400
 
@@ -159,7 +160,7 @@ Save using write_analysis with type 'next_best_action_report' and priority field
     ),
     AutonomousCapability(
         id="readiness_check",
-        name="NBA Readiness Check",
+        name="Operations Readiness Check",
         weight=15,
         prompt="""Check analysis freshness and run any stale or missing analyses to prepare
 for user-driven Next Best Action requests.
@@ -205,10 +206,14 @@ Save using write_analysis with type 'compliance_monitoring'.""",
 
 
 class AutonomousScheduler:
-    def __init__(self, interval_seconds: int = DEFAULT_INTERVAL):
+    def __init__(self, interval_seconds: int = DEFAULT_INTERVAL,
+                 max_runtime_seconds: int = DEFAULT_MAX_RUNTIME):
         self.interval = max(MIN_INTERVAL, min(MAX_INTERVAL, interval_seconds))
+        self.max_runtime = max_runtime_seconds
         self.scheduler = BackgroundScheduler()
         self.is_running = False
+        self._started_at: Optional[datetime] = None
+        self._auto_stop_at: Optional[datetime] = None
         self.last_execution: Optional[datetime] = None
         self.last_capability: Optional[str] = None
         self.execution_count = 0
@@ -256,7 +261,7 @@ class AutonomousScheduler:
         return self._execute_capability(cap)
 
     def _autonomous_job(self):
-        """Smart workflow: health check first, NBA only if issues detected."""
+        """Smart workflow: health check first, action report only if issues detected."""
         if self._paused:
             return
         logger.info("Autonomous scheduled run: starting health check")
@@ -268,21 +273,30 @@ class AutonomousScheduler:
                          "attention", "above threshold", "below target", "degraded"]
         has_issues = any(s in response_text.lower() for s in issue_signals)
         if has_issues:
-            logger.info("Health issues detected -- generating NBA report")
+            logger.info("Health issues detected -- generating action report")
             nba_cap = self._get_capability("next_best_action_report")
             if nba_cap:
                 self._execute_capability(nba_cap)
         else:
-            logger.info("No health issues found -- skipping NBA report")
+            logger.info("No health issues found -- skipping action report")
+
+    def _auto_stop(self):
+        logger.info(f"Autonomous max runtime ({self.max_runtime}s) reached -- auto-stopping")
+        self.stop()
 
     def start(self):
         if self.is_running:
             return
+        self._started_at = datetime.utcnow()
+        self._auto_stop_at = self._started_at + timedelta(seconds=self.max_runtime)
         self.scheduler.add_job(self._autonomous_job, trigger=IntervalTrigger(seconds=self.interval),
                                id="autonomous_job", replace_existing=True)
+        self.scheduler.add_job(self._auto_stop, trigger='date',
+                               run_date=self._auto_stop_at,
+                               id="auto_stop_job", replace_existing=True)
         self.scheduler.start()
         self.is_running = True
-        logger.info(f"Autonomous mode started with {self.interval}s interval")
+        logger.info(f"Autonomous mode started with {self.interval}s interval, auto-stop at {self._auto_stop_at.isoformat()}")
 
     def stop(self):
         if not self.is_running:
@@ -290,6 +304,8 @@ class AutonomousScheduler:
         self.scheduler.shutdown(wait=False)
         self.scheduler = BackgroundScheduler()
         self.is_running = False
+        self._started_at = None
+        self._auto_stop_at = None
         logger.info("Autonomous mode stopped")
 
     def pause(self):
@@ -310,6 +326,9 @@ class AutonomousScheduler:
         return {
             "is_running": self.is_running, "is_paused": self._paused,
             "interval_seconds": self.interval,
+            "max_runtime_seconds": self.max_runtime,
+            "started_at": self._started_at.isoformat() if self._started_at else None,
+            "auto_stop_at": self._auto_stop_at.isoformat() if self._auto_stop_at else None,
             "last_execution": self.last_execution.isoformat() if self.last_execution else None,
             "last_capability": self.last_capability, "execution_count": self.execution_count,
             "capabilities": [{"id": c.id, "name": c.name, "weight": c.weight,

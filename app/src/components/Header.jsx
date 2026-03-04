@@ -1,7 +1,26 @@
 import { cn } from '../lib/utils'
 
-export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData }) {
+function Spinner({ className = '' }) {
+  return (
+    <svg className={cn("animate-spin h-3 w-3", className)} viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  )
+}
+
+function formatRemaining(autoStopAt) {
+  if (!autoStopAt) return null
+  const diff = Math.max(0, Math.floor((new Date(autoStopAt + 'Z').getTime() - Date.now()) / 1000))
+  if (diff <= 0) return null
+  const h = Math.floor(diff / 3600)
+  const m = Math.floor((diff % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
+export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData, onResetData, loadingStates = {}, onOpenGuide }) {
   const isRunning = autonomousStatus?.is_running && !autonomousStatus?.is_paused
+  const remaining = isRunning ? formatRemaining(autonomousStatus?.auto_stop_at) : null
   
   const getHealthColor = (score) => {
     if (!score) return 'bg-slate-500'
@@ -24,13 +43,14 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                 </svg>
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-warm-white">MedOps NBA</h1>
-                <p className="text-xs text-slate-400">Next Best Action</p>
+                <h1 className="text-lg font-semibold text-warm-white">Hospital Control Tower</h1>
+                <p className="text-xs text-slate-400">Operations Intelligence</p>
               </div>
             </div>
             
             {healthScore && (
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 rounded-lg">
+              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 rounded-lg"
+                title="Composite score: 40% LOS + 30% readmission rate + 30% ED breaches">
                 <div className={cn("w-2 h-2 rounded-full", getHealthColor(healthScore.score))} />
                 <span className="text-sm text-slate-300">
                   Health: <span className="font-medium text-warm-white">{healthScore.score}</span>/100
@@ -49,7 +69,7 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                   ? "bg-teal-500 text-slate-900 shadow-lg shadow-teal-500/25"
                   : "text-slate-400 hover:text-warm-white hover:bg-slate-700/50"
               )}
-              title="Fast answers to specific questions. Best for counts, lookups, simple comparisons."
+              title="Fast answers (2-5s). Best for specific data lookups, counts, and comparisons."
             >
               Quick Query
             </button>
@@ -61,7 +81,7 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                   ? "bg-teal-500 text-slate-900 shadow-lg shadow-teal-500/25"
                   : "text-slate-400 hover:text-warm-white hover:bg-slate-700/50"
               )}
-              title="Thorough investigation with multiple data sources. Best for root cause, predictions, reports."
+              title="Multi-agent investigation (30-90s). Root cause analysis, reports, and recommendations."
             >
               Deep Analysis
             </button>
@@ -69,36 +89,59 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
 
           {/* Actions & Autonomous Status */}
           <div className="flex items-center gap-2">
-            <button
-              onClick={onCheckHealth}
-              className="px-3 py-2 rounded-lg text-xs font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-all"
-              title="Run health check now"
-            >
-              Check Health
-            </button>
-            <button
-              onClick={onInjectGoodData}
-              className="px-3 py-2 rounded-lg text-xs font-medium bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-all"
-              title="Inject healthy encounter data"
-            >
-              Inject Good
-            </button>
-            <button
-              onClick={onInjectAnomaly}
-              className="px-3 py-2 rounded-lg text-xs font-medium bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-all"
-              title="Inject anomalous encounter data for testing"
-            >
-              Inject Anomaly
-            </button>
+            <div className="flex items-center gap-1.5 bg-slate-800/30 rounded-xl px-3 py-1.5 border border-slate-700/30">
+              <span className="text-[10px] uppercase tracking-wider text-slate-500 font-medium mr-1">Demo Tools</span>
+              <button
+                onClick={onCheckHealth}
+                disabled={loadingStates.checkHealth}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-all flex items-center gap-1.5",
+                  loadingStates.checkHealth && "opacity-60 cursor-not-allowed")}
+                title="Trigger a one-shot health check of all operational metrics"
+              >
+                {loadingStates.checkHealth && <Spinner />}
+                Check Health
+              </button>
+              <button
+                onClick={onInjectGoodData}
+                disabled={loadingStates.injectGood}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-all flex items-center gap-1.5",
+                  loadingStates.injectGood && "opacity-60 cursor-not-allowed")}
+                title="Insert 10 healthy encounters (short LOS, no readmissions) for testing"
+              >
+                {loadingStates.injectGood && <Spinner />}
+                Inject Good
+              </button>
+              <button
+                onClick={onInjectAnomaly}
+                disabled={loadingStates.injectAnomaly}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-all flex items-center gap-1.5",
+                  loadingStates.injectAnomaly && "opacity-60 cursor-not-allowed")}
+                title="Insert anomalous data across all tables (high LOS, costly drugs, long ED waits)"
+              >
+                {loadingStates.injectAnomaly && <Spinner />}
+                Inject Anomaly
+              </button>
+              <button
+                onClick={onResetData}
+                disabled={loadingStates.reset}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-500/20 text-slate-400 hover:bg-slate-500/30 transition-all flex items-center gap-1.5",
+                  loadingStates.reset && "opacity-60 cursor-not-allowed")}
+                title="Remove all injected data and clear analysis outputs"
+              >
+                {loadingStates.reset && <Spinner />}
+                Reset
+              </button>
+            </div>
 
             <div className="flex items-center gap-2 bg-slate-800/50 rounded-xl px-4 py-2">
               <div className={cn(
                 "w-2.5 h-2.5 rounded-full transition-all",
                 isRunning ? "bg-living-green autonomous-pulse" : "bg-slate-500"
               )} />
-              <span className="text-sm text-slate-300">Auto</span>
+              <span className="text-sm text-slate-300">Auto{remaining && <span className="text-slate-500 ml-1">{remaining}</span>}</span>
               <button
                 onClick={onToggleAutonomous}
+                title={isRunning ? "Stop autonomous monitoring" : "Start autonomous monitoring (auto-stops after 2 hours)"}
                 className={cn(
                   "px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
                   isRunning
@@ -110,6 +153,15 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
               </button>
             </div>
 
+            <button
+              onClick={onOpenGuide}
+              className="p-2 text-slate-400 hover:text-warm-white hover:bg-slate-800/50 rounded-lg transition-all"
+              title="Open guided demo walkthrough"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
             <button
               onClick={onOpenSettings}
               className="p-2 text-slate-400 hover:text-warm-white hover:bg-slate-800/50 rounded-lg transition-all"

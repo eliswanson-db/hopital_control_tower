@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Diagnostic Check for Medical Logistics NBA App
+# MAGIC # Diagnostic Check for Hospital Control Tower
 # MAGIC Tests tables, permissions, tools, and LLM endpoints.
 
 # COMMAND ----------
@@ -13,12 +13,18 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# Configuration
-CATALOG = "eswanson_demo"
-SCHEMA = "med_logistics_nba"
-APP_NAME = "dev-med-logistics-nba"
-WAREHOUSE_ID = "3abb59fcfb739e0d"
-LLM_ENDPOINT = "databricks-claude-sonnet-4-5"
+# Configuration -- reads from bundle variables (var.*) when run via DAB jobs
+dbutils.widgets.text("var.catalog", "eswanson_demo", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+dbutils.widgets.text("var.app_name", "dev-hospital-control-tower", "App Name")
+dbutils.widgets.text("var.warehouse_id", "", "Warehouse ID")
+dbutils.widgets.text("var.llm_model_rag", "databricks-claude-sonnet-4-5", "LLM Endpoint")
+
+CATALOG = spark.conf.get("spark.databricks.workflow.parameters.var.catalog", dbutils.widgets.get("var.catalog"))
+SCHEMA = spark.conf.get("spark.databricks.workflow.parameters.var.schema", dbutils.widgets.get("var.schema"))
+APP_NAME = spark.conf.get("spark.databricks.workflow.parameters.var.app_name", dbutils.widgets.get("var.app_name"))
+WAREHOUSE_ID = spark.conf.get("spark.databricks.workflow.parameters.var.warehouse_id", dbutils.widgets.get("var.warehouse_id"))
+LLM_ENDPOINT = spark.conf.get("spark.databricks.workflow.parameters.var.llm_model_rag", dbutils.widgets.get("var.llm_model_rag"))
 
 print(f"Catalog: {CATALOG}")
 print(f"Schema: {SCHEMA}")
