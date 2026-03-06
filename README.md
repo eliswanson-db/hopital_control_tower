@@ -20,6 +20,12 @@ The app shows:
 - How can I reduce wait times in the Emergency Department?
 - How can I lower the use of contract labor in the cardiology department?
 
+## Screenshots
+
+![Quick Query and Dashboard](docs/images/quick_query_dashboard.png)
+
+![Deep Analysis with Charts](docs/images/deep_analysis_chart.png)
+
 ## Quickstart
 
 ### Option 1: One-Command Setup (Recommended)
