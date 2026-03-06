@@ -14,7 +14,7 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 # Configuration -- reads from bundle variables (var.*) when run via DAB jobs
-dbutils.widgets.text("var.catalog", "eswanson_demo", "Catalog")
+dbutils.widgets.text("var.catalog", "", "Catalog")
 dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
 dbutils.widgets.text("var.app_name", "dev-hospital-control-tower", "App Name")
 dbutils.widgets.text("var.warehouse_id", "", "Warehouse ID")
@@ -101,7 +101,8 @@ except Exception as e:
 
 from databricks.vector_search.client import VectorSearchClient
 
-ENDPOINT_NAME = f"{CATALOG}_{SCHEMA}_vector_endpoint".replace("-", "_")
+dbutils.widgets.text("var.vector_search_endpoint", "", "Vector Search Endpoint")
+ENDPOINT_NAME = dbutils.widgets.get("var.vector_search_endpoint")
 INDEX_NAME = f"{CATALOG}.{SCHEMA}.encounters_vector_index"
 
 print(f"\nVector Search Check:")

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 LLM_ORCHESTRATOR = os.environ.get("LLM_MODEL_ORCHESTRATOR", "databricks-gpt-oss-120b")
 LLM_RAG = os.environ.get("LLM_MODEL_RAG", "databricks-claude-sonnet-4-5")
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
+CATALOG = os.environ.get("CATALOG", "")
 SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
 
 ANALYSIS_TYPES = ["cost_monitoring", "los_analysis", "ed_performance", "staffing_analysis", "compliance_monitoring"]

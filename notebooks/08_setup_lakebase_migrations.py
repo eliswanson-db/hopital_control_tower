@@ -19,10 +19,14 @@ import os
 import sys
 
 # Configuration
-CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
-SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
-LAKEBASE_HOST = spark.conf.get("var.lakebase_host", "")
-LAKEBASE_DATABASE = spark.conf.get("var.lakebase_database", "postgres")
+dbutils.widgets.text("var.catalog", "", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+dbutils.widgets.text("var.lakebase_host", "", "Lakebase Host")
+dbutils.widgets.text("var.lakebase_database", "postgres", "Lakebase Database")
+CATALOG = dbutils.widgets.get("var.catalog")
+SCHEMA = dbutils.widgets.get("var.schema")
+LAKEBASE_HOST = dbutils.widgets.get("var.lakebase_host")
+LAKEBASE_DATABASE = dbutils.widgets.get("var.lakebase_database")
 
 if not LAKEBASE_HOST:
     raise ValueError("LAKEBASE_HOST must be configured. Set var.lakebase_host in variables.yml")

@@ -7,8 +7,10 @@
 # COMMAND ----------
 
 # Configuration
-CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
-SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
+dbutils.widgets.text("var.catalog", "", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+CATALOG = dbutils.widgets.get("var.catalog")
+SCHEMA = dbutils.widgets.get("var.schema")
 
 print(f"Unity Catalog: {CATALOG}.{SCHEMA}")
 

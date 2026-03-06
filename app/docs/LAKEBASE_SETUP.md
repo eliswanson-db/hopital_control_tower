@@ -77,7 +77,7 @@ Edit `variables.yml`:
 variables:
   catalog:
     description: Unity Catalog name
-    default: eswanson_demo
+    default: your_catalog
     
   schema:
     description: Schema name

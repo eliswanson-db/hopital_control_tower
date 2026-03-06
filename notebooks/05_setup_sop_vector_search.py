@@ -13,9 +13,12 @@
 # COMMAND ----------
 
 # Configuration
-CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
-SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
-VECTOR_ENDPOINT = spark.conf.get("var.vector_search_endpoint", f"{CATALOG}_{SCHEMA}_vector_endpoint").replace("-", "_")
+dbutils.widgets.text("var.catalog", "", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+dbutils.widgets.text("var.vector_search_endpoint", "", "Vector Search Endpoint")
+CATALOG = dbutils.widgets.get("var.catalog")
+SCHEMA = dbutils.widgets.get("var.schema")
+VECTOR_ENDPOINT = dbutils.widgets.get("var.vector_search_endpoint")
 SOP_VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.sop_vector_index"
 SOP_PDFS_TABLE = f"{CATALOG}.{SCHEMA}.sop_pdfs"
 SOP_PARSED_TABLE = f"{CATALOG}.{SCHEMA}.sop_parsed"

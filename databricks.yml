@@ -11,11 +11,13 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://fe-vm-vdm-classic-q6xfh3.cloud.databricks.com/ # workspace URL
+      host: # your workspace URL, e.g. https://my-workspace.cloud.databricks.com/
     variables:
-      catalog: eswanson_demo # Unity Catalog name
+      catalog: # your Unity Catalog name
       schema: med_logistics_nba
-      warehouse_id: 3abb59fcfb739e0d # SQL Warehouse ID
+      warehouse_id: # your SQL Warehouse ID
+      vector_search_endpoint: # your Vector Search endpoint name
+      lakebase_instance: # your Lakebase instance name (optional)
       node_type_id: i3.xlarge
 
   prod:

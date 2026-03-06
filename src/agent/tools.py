@@ -17,10 +17,10 @@ def get_workspace_client() -> WorkspaceClient:
     return _workspace_client
 
 
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
+CATALOG = os.environ.get("CATALOG", "")
 SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-VECTOR_ENDPOINT = os.environ.get("VECTOR_SEARCH_ENDPOINT", f"{CATALOG}_{SCHEMA}_vector_endpoint")
+VECTOR_ENDPOINT = os.environ.get("VECTOR_SEARCH_ENDPOINT", "")
 VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.encounters_vector_index"
 ANALYSIS_TABLE = f"{CATALOG}.{SCHEMA}.analysis_outputs"
 

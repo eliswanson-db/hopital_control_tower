@@ -22,8 +22,10 @@ Faker.seed(42)
 random.seed(42)
 
 # Configuration
-CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
-SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
+dbutils.widgets.text("var.catalog", "", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+CATALOG = dbutils.widgets.get("var.catalog")
+SCHEMA = dbutils.widgets.get("var.schema")
 
 dbutils.widgets.text("encounter_count", "10", "Number of Encounters to Add")
 dbutils.widgets.text("readmission_rate", "0.10", "Readmission Rate (0-1)")

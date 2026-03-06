@@ -3,7 +3,7 @@ import os
 from typing import List, Dict, Any, Optional
 from .tools import execute_sql, search_encounters, write_analysis
 
-CATALOG = os.environ.get("CATALOG", "eswanson_demo")
+CATALOG = os.environ.get("CATALOG", "")
 SCHEMA = os.environ.get("SCHEMA", "med_logistics_nba")
 
 

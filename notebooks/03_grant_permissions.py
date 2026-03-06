@@ -7,9 +7,12 @@
 # COMMAND ----------
 
 # Configuration
-CATALOG = spark.conf.get("var.catalog", "eswanson_demo")
-SCHEMA = spark.conf.get("var.schema", "med_logistics_nba")
-APP_NAME = spark.conf.get("var.app_name", "dev-hospital-control-tower")
+dbutils.widgets.text("var.catalog", "", "Catalog")
+dbutils.widgets.text("var.schema", "med_logistics_nba", "Schema")
+dbutils.widgets.text("var.app_name", "dev-hospital-control-tower", "App Name")
+CATALOG = dbutils.widgets.get("var.catalog")
+SCHEMA = dbutils.widgets.get("var.schema")
+APP_NAME = dbutils.widgets.get("var.app_name")
 
 print(f"Catalog: {CATALOG}")
 print(f"Schema: {SCHEMA}")
@@ -108,7 +111,8 @@ for table in WRITE_TABLES:
 
 # COMMAND ----------
 
-VECTOR_ENDPOINT = f"{CATALOG}_{SCHEMA}_vector_endpoint".replace("-", "_")
+dbutils.widgets.text("var.vector_search_endpoint", "", "Vector Search Endpoint")
+VECTOR_ENDPOINT = dbutils.widgets.get("var.vector_search_endpoint")
 ENCOUNTER_VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.encounters_vector_index"
 SOP_VECTOR_INDEX = f"{CATALOG}.{SCHEMA}.sop_vector_index"
 

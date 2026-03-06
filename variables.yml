@@ -10,7 +10,7 @@ variables:
     default: ""
   catalog:
     description: "Unity Catalog name"
-    default: "eswanson_demo"
+    default: ""
   schema:
     description: "Schema name"
     default: "med_logistics_nba"
@@ -22,7 +22,7 @@ variables:
     default: "i3.xlarge"
   lakebase_instance:
     description: "Lakebase instance name"
-    default: "es-test-pg"
+    default: ""
   lakebase_host:
     description: "Lakebase PostgreSQL host (get from UI: Data > Databases > instance > Connection details)"
     default: ""
@@ -31,7 +31,7 @@ variables:
     default: "postgres"
   vector_search_endpoint:
     description: "Vector Search endpoint name"
-    default: "eswanson_demo_med_logistics_nba_vector_endpoint"
+    default: ""
   heartbeat_interval_seconds:
     description: "Interval for agent heartbeat in seconds"
     default: "60"
