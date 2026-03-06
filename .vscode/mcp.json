@@ -1,9 +1,0 @@
-{
-  "servers": {
-    "databricks": {
-      "command": "/Users/eli.swanson/.ai-dev-kit/.venv/bin/python",
-      "args": ["/Users/eli.swanson/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"],
-      "env": {"DATABRICKS_CONFIG_PROFILE": "DMVM"}
-    }
-  }
-}
