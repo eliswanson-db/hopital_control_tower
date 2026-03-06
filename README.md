@@ -81,6 +81,9 @@ You also need:
 
 ## Architecture
 
+<details>
+<summary>Architecture diagram</summary>
+
 ```mermaid
 flowchart TB
     subgraph frontend [React Frontend]
@@ -111,6 +114,7 @@ flowchart TB
     QQ & DA & AU --> UC & VS & FM
     DA --> ML
 ```
+</details>
 
 ## Agent Modes
 
