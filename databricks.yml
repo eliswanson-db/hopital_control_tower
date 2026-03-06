@@ -11,11 +11,11 @@ targets:
     mode: development
     default: true
     workspace:
-      host: https://fe-vm-vdm-classic-q6xfh3.cloud.databricks.com/
+      host: https://fe-vm-vdm-classic-q6xfh3.cloud.databricks.com/ # workspace URL
     variables:
-      catalog: eswanson_demo
+      catalog: eswanson_demo # Unity Catalog name
       schema: med_logistics_nba
-      warehouse_id: 3abb59fcfb739e0d # Update with your warehouse ID
+      warehouse_id: 3abb59fcfb739e0d # SQL Warehouse ID
       node_type_id: i3.xlarge
 
   prod:

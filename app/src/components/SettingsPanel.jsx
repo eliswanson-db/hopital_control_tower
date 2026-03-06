@@ -22,6 +22,8 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
   const [intervalSec, setIntervalSec] = useState(autonomousStatus?.interval_seconds || 3600)
   const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES)
   const [saving, setSaving] = useState(false)
+  const [injectCount, setInjectCount] = useState(() => parseInt(localStorage.getItem('inject_count') || '30', 10))
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     if (autonomousStatus?.interval_seconds) {
@@ -38,6 +40,7 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
   const handleSave = async () => {
     setSaving(true)
     try {
+      localStorage.setItem('inject_count', String(injectCount))
       await fetch('/api/autonomous/config', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -52,6 +55,18 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
       console.error('Failed to save settings:', err)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const refreshDates = async () => {
+    setRefreshing(true)
+    try {
+      await fetch('/api/data/refresh-dates', { method: 'POST' })
+      onSave?.()
+    } catch (err) {
+      console.error('Refresh dates failed:', err)
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -135,6 +150,41 @@ export default function SettingsPanel({ autonomousStatus, onClose, onSave }) {
                   <span className="text-xs text-slate-500">{cap.enabled ? 'On' : 'Off'}</span>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Demo Data */}
+          <div className="border-t border-slate-700/50 pt-5">
+            <label className="text-sm text-slate-400 mb-3 block">Demo Data</label>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-300">Injection batch size</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range" min="1" max="1000" value={injectCount}
+                    onChange={e => setInjectCount(parseInt(e.target.value, 10))}
+                    className="w-32 accent-amber-500"
+                  />
+                  <input
+                    type="number" min="1" max="1000" value={injectCount}
+                    onChange={e => setInjectCount(Math.max(1, Math.min(1000, parseInt(e.target.value, 10) || 1)))}
+                    className="w-16 bg-slate-700/50 border border-slate-600/50 rounded-lg px-2 py-1 text-sm text-warm-white text-center"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-sm text-slate-300">Refresh data dates</span>
+                  <p className="text-xs text-slate-500 mt-0.5">Shift base data forward if older than 3 days</p>
+                </div>
+                <button
+                  onClick={refreshDates}
+                  disabled={refreshing}
+                  className="px-3 py-1.5 bg-slate-700/50 text-slate-300 rounded-lg text-xs font-medium hover:bg-slate-700 transition-all disabled:opacity-50"
+                >
+                  {refreshing ? 'Refreshing...' : 'Refresh Now'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

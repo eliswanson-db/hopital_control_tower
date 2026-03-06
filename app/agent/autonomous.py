@@ -47,6 +47,8 @@ Generate report with:
 - Specific drugs driving cost increases
 - SOP-grounded recommendations for cost containment
 
+FORMATTING: Use markdown. Each recommendation on its own numbered line with a blank line between items. Use **bold** for section headings.
+
 Save using write_analysis with type 'cost_monitoring'.""",
     ),
     AutonomousCapability(
@@ -73,6 +75,8 @@ Generate report with:
 - Top 3 departments with improvement opportunities
 - CAPA recommendations citing specific SOPs
 
+FORMATTING: Use markdown. Each recommendation on its own numbered line with a blank line between items. Use **bold** for section headings.
+
 Save using write_analysis with type 'los_analysis'.""",
     ),
     AutonomousCapability(
@@ -95,6 +99,8 @@ Generate report with:
 - Wait times by acuity with threshold status
 - Breach frequency and patterns
 - Specific recommendations for wait time reduction
+
+FORMATTING: Use markdown. Each recommendation on its own numbered line with a blank line between items. Use **bold** for section headings.
 
 Save using write_analysis with type 'ed_performance'.""",
     ),
@@ -119,6 +125,8 @@ Generate report with:
 - Cost impact analysis
 - Recruitment vs contract labor ROI
 - SOP-grounded recommendations for reducing contract reliance
+
+FORMATTING: Use markdown. Each recommendation on its own numbered line with a blank line between items. Use **bold** for section headings.
 
 Save using write_analysis with type 'staffing_analysis'.""",
     ),
@@ -149,12 +157,24 @@ STEP 3 - Ground with SOPs:
    - search_sops: "quality improvement protocols"
    - search_sops: "patient safety procedures"
 
-STEP 4 - Generate prioritized report:
-   - Executive summary (2-3 sentences)
-   - Critical actions (immediate, within 4 hours)
-   - High priority actions (within 24 hours)
-   - Medium priority actions (within week)
-   For each action: description, SOP citation, expected outcome, effort, risk if not addressed.
+STEP 4 - Generate prioritized report using markdown formatting:
+
+**CRITICAL** (immediate, within 4 hours)
+
+1. Action description -- SOP: ... Expected outcome: ... Risk if delayed: ...
+
+2. Next action...
+
+**HIGH PRIORITY** (within 24 hours)
+
+3. Action description...
+
+**MEDIUM PRIORITY** (within week)
+
+4. Action description...
+
+Each action MUST be on its own numbered line with a blank line between items.
+Start with a 2-3 sentence executive summary before the priority sections.
 
 Save using write_analysis with type 'next_best_action_report' and priority field set.""",
     ),
@@ -180,6 +200,8 @@ for user-driven Next Best Action requests.
 
 4. After all prerequisite analyses are current, log a summary of what was refreshed.
 
+FORMATTING: Use markdown. Each finding on its own numbered line with a blank line between items. Use **bold** for section headings.
+
 Save a summary using write_analysis with type 'readiness_check'.""",
     ),
     AutonomousCapability(
@@ -199,6 +221,8 @@ For each KPI:
 1. Get current value and 30-day trend
 2. Calculate days until threshold breach if trending negatively
 3. Compare across hospitals
+
+FORMATTING: Use markdown. Each finding on its own numbered line with a blank line between items. Use **bold** for section headings.
 
 Save using write_analysis with type 'compliance_monitoring'.""",
     ),

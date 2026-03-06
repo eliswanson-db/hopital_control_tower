@@ -23,6 +23,13 @@ if not os.path.exists(DIST_FOLDER):
 app = Flask(__name__, static_folder="dist", static_url_path="")
 CORS(app)
 
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    code = getattr(e, "code", 500)
+    return jsonify({"error": str(e)}), code
+
+
 from agent.config import (
     CATALOG, SCHEMA, WAREHOUSE_ID,
     ANALYSIS_TABLE, ENCOUNTERS_TABLE, DRUG_COSTS_TABLE,
@@ -132,7 +139,10 @@ def _shift_data_dates_if_stale():
         return
     try:
         cols, rows = _run_sql(f"SELECT DATEDIFF(CURRENT_DATE, MAX(DATE(admit_date))) as stale_days FROM {ENCOUNTERS_TABLE}")
-        stale_days = int(rows[0][0] or 0) if rows and rows[0][0] else 0
+        if not rows or not rows[0] or rows[0][0] is None:
+            logger.info("SEED: No encounter data found, skipping date shift")
+            return
+        stale_days = int(rows[0][0])
         if stale_days <= 3:
             logger.info(f"SEED: Data is fresh (most recent encounter {stale_days} days ago)")
             return
@@ -370,6 +380,25 @@ def get_deep_task(task_id):
     return jsonify(task)
 
 
+@app.route("/api/agent/plot", methods=["POST"])
+def agent_plot():
+    """Generate a chart specification from an agent response."""
+    if not load_agent():
+        return jsonify({"no_data": True, "reason": "Agent not available"}), 503
+    try:
+        body = request.json or {}
+        content = body.get("content", "")
+        history = body.get("history", [])
+        if not content:
+            return jsonify({"no_data": True, "reason": "No content provided"}), 400
+        from agent.graph import create_plot_spec
+        spec = create_plot_spec(content, history)
+        return jsonify(spec)
+    except Exception as e:
+        logger.error(f"Plot agent error: {e}", exc_info=True)
+        return jsonify({"no_data": True, "reason": str(e)}), 500
+
+
 # Autonomous mode endpoints
 @app.route("/api/autonomous/status", methods=["GET"])
 def autonomous_status():
@@ -454,13 +483,15 @@ def inject_anomaly():
     """Insert anomalous data across all tables -- high LOS, high costs, long ED waits, high contract labor."""
     try:
         import random
+        body = request.get_json(silent=True) or {}
+        count = max(1, min(1000, int(body.get("count", 30))))
         ts = int(datetime.utcnow().timestamp())
         now = datetime.utcnow()
         hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
         depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology"]
         enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
 
-        for i in range(30):
+        for i in range(count):
             eid = f"ANOM_{ts}_{i:03d}"
             hosp = random.choice(hospitals)
             dept = random.choice(depts)
@@ -503,13 +534,15 @@ def inject_good_data():
     """Insert healthy data across all tables -- short LOS, low costs, fast ED, low contract labor."""
     try:
         import random
+        body = request.get_json(silent=True) or {}
+        count = max(1, min(1000, int(body.get("count", 30))))
         ts = int(datetime.utcnow().timestamp())
         now = datetime.utcnow()
         hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
         depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology", "Pediatrics"]
         enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
 
-        for i in range(30):
+        for i in range(count):
             eid = f"GOOD_{ts}_{i:03d}"
             hosp = random.choice(hospitals)
             dept = random.choice(depts)
@@ -558,9 +591,21 @@ def reset_demo_data():
             _exec_sql(f"DELETE FROM {ANALYSIS_TABLE} WHERE 1=1")
         except Exception:
             pass
-        return jsonify({"success": True, "message": "Injected data and analysis cleared"})
+        _shift_data_dates_if_stale()
+        return jsonify({"success": True, "message": "Injected data cleared, analyses removed, dates refreshed"})
     except Exception as e:
         logger.error(f"Reset data error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/refresh-dates", methods=["POST"])
+def refresh_dates():
+    """Shift base data dates forward if stale."""
+    try:
+        _shift_data_dates_if_stale()
+        return jsonify({"success": True, "message": "Date refresh complete"})
+    except Exception as e:
+        logger.error(f"Refresh dates error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -968,6 +1013,18 @@ def get_readmissions():
         return jsonify({"error": str(e), "readmissions": []}), 200
 
 
+import re as _re
+
+def _format_recommendation(text):
+    """Convert old-style prose recommendations into markdown for display."""
+    if not text or '\n' in text:
+        return text
+    t = _re.sub(r'(HIGH PRIORITY|MEDIUM PRIORITY|LOW PRIORITY|CRITICAL)\s*:', r'\n\n**\1:**\n\n', text)
+    t = _re.sub(r';\s*\((\d+)\)\s*', r'\n\n\1. ', t)
+    t = _re.sub(r'\((\d+)\)\s*', r'\n\n\1. ', t)
+    return t.strip()
+
+
 @app.route("/api/recommendations/latest", methods=["GET"])
 def get_recommendations():
     try:
@@ -984,7 +1041,8 @@ def get_recommendations():
                 "id": data.get("id"), "encounter_id": data.get("encounter_id"),
                 "type": data.get("analysis_type"),
                 "insight": (data.get("insights", "")[:200] + "...") if len(data.get("insights", "")) > 200 else data.get("insights", ""),
-                "action": data.get("recommendations"), "created_at": data.get("created_at"),
+                "action": _format_recommendation(data.get("recommendations", "")),
+                "created_at": data.get("created_at"),
                 "timestamp": data.get("created_at"),
             })
         return jsonify({"recommendations": recommendations, "count": len(recommendations)})
@@ -1045,30 +1103,48 @@ def get_suggestions():
         high_contract_dept = contract_rows[0][0] if contract_rows else None
 
         if readmit_rate > 10:
-            suggestions.append({"label": f"Why is readmission at {readmit_rate}%?", "query": f"What's driving the {readmit_rate}% readmission rate and what can we do about it?"})
+            suggestions.append({"label": f"Root cause: Why are {readmit_rate}% of patients readmitted?",
+                                "query": f"The 30-day readmission rate is {readmit_rate}%. Analyze root causes by department and payer, and recommend specific interventions grounded in our SOPs."})
         if avg_los > 5:
-            suggestions.append({"label": f"LOS is {avg_los:.1f}d -- how to reduce?", "query": f"Average LOS is {avg_los:.1f} days, above the 5-day target. What specific actions can reduce it?"})
+            suggestions.append({"label": f"Action plan: Reduce LOS from {avg_los:.1f} to target 5 days",
+                                "query": f"Average length of stay is {avg_los:.1f} days, above the 5-day target. Which departments are the biggest contributors? What SOP-backed actions can bring it down?"})
         if ed_breaches > 3:
-            suggestions.append({"label": f"{ed_breaches} ED wait breaches", "query": f"We have {ed_breaches} ED wait time breaches this week. What's causing them and how do we fix it?"})
+            suggestions.append({"label": f"Investigate: {ed_breaches} patients waited 60+ min in ED",
+                                "query": f"We had {ed_breaches} ED wait-time breaches (>60 min) this week. Break down by hospital and acuity level, identify bottlenecks, and recommend fixes."})
         if high_contract_dept:
-            suggestions.append({"label": f"High contract labor in {high_contract_dept}", "query": f"Why is contract labor high in {high_contract_dept} and how can we reduce it?"})
+            suggestions.append({"label": f"Cost control: {high_contract_dept} contract labor above 30%",
+                                "query": f"Contract labor in {high_contract_dept} exceeds 30% of total FTEs. What's driving reliance on contract staff, and what's the plan to reduce it?"})
         _, cost_rows = _run_sql(f"SELECT ROUND(SUM(total_cost),0) FROM {DRUG_COSTS_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 7 DAYS", w)
         week_cost = float(cost_rows[0][0] or 0) if cost_rows and cost_rows[0][0] else 0
         if week_cost > 50000:
-            suggestions.append({"label": f"Drug spend ${week_cost/1000:.0f}k this week", "query": f"Drug costs are ${week_cost:,.0f} this week. Which categories are driving the increase?"})
+            suggestions.append({"label": f"Spend alert: ${week_cost/1000:.0f}k drug costs this week",
+                                "query": f"Drug costs hit ${week_cost:,.0f} this week. Which drug categories and hospitals are driving the increase? Are there formulary alternatives?"})
 
-        if len(suggestions) < 3:
-            suggestions.append({"label": "Generate next best actions", "query": "Based on current operations data, what are the top 3 next best actions for hospital leadership?"})
-        if len(suggestions) < 4:
-            suggestions.append({"label": "Reduce ED wait times", "query": "How can I reduce wait times in the Emergency Department?"})
-        if len(suggestions) < 5:
-            suggestions.append({"label": "Monday discharge patterns", "query": "Why is LOS higher for patients discharged on Mondays?"})
+        fallbacks = [
+            {"label": "Top 3 actions for hospital leadership this week",
+             "query": "Based on all current operations data, what are the top 3 next best actions hospital leadership should take this week? Prioritize by impact."},
+            {"label": "Compare ED performance across all hospitals",
+             "query": "Compare Emergency Department wait times, breach rates, and throughput across Hospital A, B, and C. Which hospital is performing best and why?"},
+            {"label": "Which departments have highest readmission risk?",
+             "query": "Analyze readmission risk by department. Which departments have the highest readmission rates, and what patient or operational factors are correlated?"},
+            {"label": "What do SOPs say about reducing surgical LOS?",
+             "query": "Search our standard operating procedures for guidance on reducing length of stay for surgical patients. Summarize the key protocols."},
+            {"label": "Create a staffing optimization plan",
+             "query": "Analyze current staffing patterns across hospitals. Where is contract labor highest? Create a quarterly plan to optimize the full-time to contract ratio."},
+        ]
+        for fb in fallbacks:
+            if len(suggestions) >= 5:
+                break
+            suggestions.append(fb)
     except Exception as e:
         logger.warning(f"Suggestions error: {e}")
         suggestions = [
-            {"label": "How to reduce LOS?", "query": "What specific actions can I take to reduce length of stay?"},
-            {"label": "Reduce ED wait times", "query": "How can I reduce wait times in the Emergency Department?"},
-            {"label": "Drug cost analysis", "query": "Why did drug costs spike recently?"},
+            {"label": "Top 3 actions for hospital leadership this week",
+             "query": "Based on current operations data, what are the top 3 next best actions hospital leadership should take this week?"},
+            {"label": "Compare ED performance across all hospitals",
+             "query": "Compare ED wait times and breach rates across Hospital A, B, and C."},
+            {"label": "What do SOPs say about reducing surgical LOS?",
+             "query": "Search our SOPs for guidance on reducing length of stay for surgical patients."},
         ]
     return jsonify({"suggestions": suggestions[:5]})
 
@@ -1088,62 +1164,37 @@ def record_autonomous_result(message, issues_found):
     }
 
 
-@app.route("/api/debug", methods=["GET"])
-def debug_endpoint():
-    """Diagnostic endpoint -- hit in browser to see full config + connectivity report."""
-    results = {"timestamp": datetime.utcnow().isoformat()}
 
-    results["config"] = {
-        "CATALOG": CATALOG, "SCHEMA": SCHEMA, "WAREHOUSE_ID": WAREHOUSE_ID,
-        "ENCOUNTERS_TABLE": ENCOUNTERS_TABLE, "DRUG_COSTS_TABLE": DRUG_COSTS_TABLE,
-        "STAFFING_TABLE": STAFFING_TABLE, "ED_WAIT_TABLE": ED_WAIT_TABLE,
-        "ANALYSIS_TABLE": ANALYSIS_TABLE,
-    }
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
-    tables_to_test = {
-        "dim_encounters": (ENCOUNTERS_TABLE, "SELECT COUNT(*) as cnt, MIN(admit_date) as min_dt, MAX(admit_date) as max_dt FROM {t}"),
-        "fact_drug_costs": (DRUG_COSTS_TABLE, "SELECT COUNT(*) as cnt, MIN(date) as min_dt, MAX(date) as max_dt FROM {t}"),
-        "fact_staffing": (STAFFING_TABLE, "SELECT COUNT(*) as cnt, MIN(date) as min_dt, MAX(date) as max_dt FROM {t}"),
-        "fact_ed_wait_times": (ED_WAIT_TABLE, "SELECT COUNT(*) as cnt, MIN(arrival_time) as min_dt, MAX(arrival_time) as max_dt FROM {t}"),
-        "analysis_outputs": (ANALYSIS_TABLE, "SELECT COUNT(*) as cnt FROM {t}"),
-    }
 
-    if not WAREHOUSE_ID:
-        results["error"] = "WAREHOUSE_ID is empty -- all SQL will fail"
-        return jsonify(results)
+@app.route("/api/docs", methods=["GET"])
+def list_docs():
+    """List available documentation files."""
+    docs = []
+    if os.path.isdir(DOCS_DIR):
+        for f in sorted(os.listdir(DOCS_DIR)):
+            if f.endswith(".md"):
+                name = f[:-3]
+                title = name.replace("_", " ").title()
+                docs.append({"name": name, "filename": f, "title": title})
+    return jsonify({"docs": docs})
 
-    try:
-        w = get_workspace_client()
-        results["workspace_client"] = "OK"
-    except Exception as e:
-        results["workspace_client"] = f"FAILED: {e}"
-        return jsonify(results)
 
-    results["tables"] = {}
-    for name, (table, query_tpl) in tables_to_test.items():
-        query = query_tpl.format(t=table)
-        try:
-            cols, rows = _run_sql(query, w)
-            if rows:
-                row = dict(zip(cols, rows[0]))
-                results["tables"][name] = {"status": "OK", "data": row}
-            else:
-                results["tables"][name] = {"status": "OK", "data": "no rows returned"}
-        except Exception as e:
-            results["tables"][name] = {"status": "FAILED", "error": str(e)}
-
-    try:
-        test_id = f"_DEBUG_TEST_{int(datetime.utcnow().timestamp())}"
-        insert_q = f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES ('{test_id}', 'TEST', 'TEST', 'TEST', 'TEST', '2020-01-01', '2020-01-02', 1, false, 'TEST')"
-        _exec_sql(insert_q)
-        _exec_sql(f"DELETE FROM {ENCOUNTERS_TABLE} WHERE encounter_id = '{test_id}'")
-        results["write_test"] = "OK -- INSERT and DELETE succeeded"
-    except Exception as e:
-        results["write_test"] = f"FAILED: {e}"
-
-    return jsonify(results)
+@app.route("/api/docs/<name>", methods=["GET"])
+def get_doc(name):
+    """Return markdown content of a doc file."""
+    safe_name = os.path.basename(name)
+    path = os.path.join(DOCS_DIR, f"{safe_name}.md")
+    if not os.path.isfile(path):
+        return jsonify({"error": "Doc not found"}), 404
+    with open(path, "r") as fh:
+        content = fh.read()
+    title = content.split("\n")[0].lstrip("# ").strip() if content.startswith("#") else safe_name
+    return jsonify({"name": safe_name, "title": title, "content": content})
 
 
 if __name__ == "__main__":
+    load_agent()
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)

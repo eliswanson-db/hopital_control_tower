@@ -21,12 +21,19 @@ print(f"App Name: {APP_NAME}")
 from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
 
-app_info = w.apps.get(name=APP_NAME)
+try:
+    app_info = w.apps.get(name=APP_NAME)
+except Exception as e:
+    raise RuntimeError(
+        f"Could not find app '{APP_NAME}'. Deploy the app first (setup.sh or Databricks Apps UI), then re-run this notebook.\n"
+        f"Error: {e}"
+    )
+
 SP_NAME = app_info.service_principal_name
 SP_ID = str(app_info.service_principal_id or "")
 SP_CLIENT_ID = app_info.service_principal_client_id
 if not SP_CLIENT_ID:
-    raise RuntimeError(f"App '{APP_NAME}' has no service_principal_client_id.")
+    raise RuntimeError(f"App '{APP_NAME}' has no service_principal_client_id. Ensure the app was deployed and has an associated service principal.")
 PRINCIPAL = f"`{SP_CLIENT_ID}`"
 print(f"Resolved SP from app '{APP_NAME}': {PRINCIPAL} (id={SP_ID})")
 

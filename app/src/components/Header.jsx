@@ -18,7 +18,7 @@ function formatRemaining(autoStopAt) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
-export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData, onResetData, loadingStates = {}, onOpenGuide }) {
+export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData, onResetData, loadingStates = {}, onOpenGuide, onOpenDocs }) {
   const isRunning = autonomousStatus?.is_running && !autonomousStatus?.is_paused
   const remaining = isRunning ? formatRemaining(autonomousStatus?.auto_stop_at) : null
   
@@ -106,7 +106,7 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                 disabled={loadingStates.injectGood}
                 className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-all flex items-center gap-1.5",
                   loadingStates.injectGood && "opacity-60 cursor-not-allowed")}
-                title="Insert 10 healthy encounters (short LOS, no readmissions) for testing"
+                title="Add healthy encounters (batch size configurable in Settings)"
               >
                 {loadingStates.injectGood && <Spinner />}
                 Inject Good
@@ -160,6 +160,15 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </button>
+            <button
+              onClick={onOpenDocs}
+              className="p-2 text-slate-400 hover:text-warm-white hover:bg-slate-800/50 rounded-lg transition-all"
+              title="View documentation"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
               </svg>
             </button>
             <button

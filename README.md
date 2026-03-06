@@ -54,8 +54,9 @@ The app shows:
 ### Option 2: Git Folder (No CLI)
 
 1. Clone this repository into a Databricks Git Folder
-2. Run notebooks in order: `00_generate_data.py` -> `02_setup_vector_search.py` -> `03_grant_permissions.py` -> `05_setup_sop_vector_search.py`
-3. Deploy the app from the Databricks Apps UI, pointing to `app/` with `app.yaml` as the configuration
+2. Run notebooks in order: `00_generate_data.py` -> `01_setup_lakebase.py` -> `02_setup_vector_search.py` -> `03_grant_permissions.py` -> `05_setup_sop_vector_search.py`
+3. Edit `app/app.yaml` with your catalog, schema, warehouse ID, and vector search endpoint
+4. Deploy the app from the Databricks Apps UI, pointing to `app/` with `app.yaml` as the configuration
 
 ## Prerequisites
 
@@ -81,7 +82,7 @@ flowchart TB
     end
 
     subgraph server [Flask API Server]
-        API["REST + SSE Endpoints"]
+        API["REST Endpoints"]
     end
 
     subgraph agents [Agent Layer]
@@ -276,7 +277,7 @@ medical_logistics_nba_app/
 | sqlalchemy | >= 2.0.0 | MIT | SQL toolkit and ORM | [PyPI](https://pypi.org/project/SQLAlchemy/) |
 | alembic | >= 1.13.0 | MIT | Database migration tool for SQLAlchemy | [PyPI](https://pypi.org/project/alembic/) |
 | psycopg2-binary | >= 2.9.0 | LGPL-3.0 | PostgreSQL adapter for Python | [PyPI](https://pypi.org/project/psycopg2-binary/) |
-| mlflow | >= 2.10.0 | Apache 2.0 | ML lifecycle management and tracing | [PyPI](https://pypi.org/project/mlflow/) |
+| mlflow | >= 3.1 | Apache 2.0 | ML lifecycle management and tracing | [PyPI](https://pypi.org/project/mlflow/) |
 
 ### Frontend
 

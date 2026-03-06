@@ -4,6 +4,7 @@ import ConversationView from './components/ConversationView'
 import DashboardPanel from './components/DashboardPanel'
 import SettingsPanel from './components/SettingsPanel'
 import DemoGuide from './components/DemoGuide'
+import DocsViewer from './components/DocsViewer'
 
 function Toast({ toast, onDismiss }) {
   const colors = {
@@ -20,7 +21,7 @@ function Toast({ toast, onDismiss }) {
 }
 
 function App() {
-  const [mode, setMode] = useState('deep')
+  const [mode, setMode] = useState('quick')
   const [autonomousStatus, setAutonomousStatus] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
   const [healthScore, setHealthScore] = useState(null)
@@ -28,6 +29,7 @@ function App() {
   const [toasts, setToasts] = useState([])
   const [loadingStates, setLoadingStates] = useState({})
   const [showGuide, setShowGuide] = useState(() => !localStorage.getItem('demo_guide_seen'))
+  const [showDocs, setShowDocs] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const toastIdRef = useRef(0)
 
@@ -99,13 +101,19 @@ function App() {
     }
   }
 
+  const getInjectCount = () => parseInt(localStorage.getItem('inject_count') || '30', 10)
+
   const injectAnomaly = async () => {
     setLoading('injectAnomaly', true)
+    const count = getInjectCount()
     try {
-      const res = await fetch('/api/data/inject-anomaly', { method: 'POST' })
+      const res = await fetch('/api/data/inject-anomaly', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count }),
+      })
       const data = await res.json().catch(() => ({}))
       if (res.ok && !data.error) {
-        addToast(`Injected ${data.encounters || 30} anomalous encounters + ED/drug/staffing data`)
+        addToast(`Injected ${data.encounters || count} anomalous encounters + ED/drug/staffing data`)
         setTimeout(() => { fetchHealthScore(); setRefreshKey(k => k + 1) }, 2000)
       } else {
         addToast(`Inject anomaly failed: ${data.error || res.statusText}`, 'error')
@@ -119,11 +127,15 @@ function App() {
 
   const injectGoodData = async () => {
     setLoading('injectGood', true)
+    const count = getInjectCount()
     try {
-      const res = await fetch('/api/data/inject-good', { method: 'POST' })
+      const res = await fetch('/api/data/inject-good', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count }),
+      })
       const data = await res.json().catch(() => ({}))
       if (res.ok && !data.error) {
-        addToast(`Injected ${data.encounters || 30} healthy encounters + ED/drug/staffing data`)
+        addToast(`Injected ${data.encounters || count} healthy encounters + ED/drug/staffing data`)
         setTimeout(() => { fetchHealthScore(); setRefreshKey(k => k + 1) }, 2000)
       } else {
         addToast(`Inject good failed: ${data.error || res.statusText}`, 'error')
@@ -193,6 +205,7 @@ function App() {
         onResetData={resetDemoData}
         loadingStates={loadingStates}
         onOpenGuide={() => setShowGuide(true)}
+        onOpenDocs={() => setShowDocs(true)}
       />
 
       <main className="flex-1 flex overflow-hidden">
@@ -217,6 +230,7 @@ function App() {
       )}
 
       {showGuide && <DemoGuide onClose={dismissGuide} />}
+      {showDocs && <DocsViewer onClose={() => setShowDocs(false)} />}
 
       {toasts.length > 0 && (
         <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">

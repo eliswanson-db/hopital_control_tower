@@ -82,7 +82,7 @@ cat > app/app.yaml << APPYAML
 command:
   - sh
   - -c
-  - pip install -r requirements.txt && npm install && npm run build && gunicorn --bind 0.0.0.0:8000 --workers 2 --timeout 600 api_server:app
+  - pip install -r requirements.txt && npm install && npm run build && gunicorn --bind 0.0.0.0:8000 --workers 1 --threads 4 --timeout 600 api_server:app
 
 env:
   - name: DATABRICKS_WAREHOUSE_ID

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { cn } from '../lib/utils'
 
 function StatCard({ title, value, subtitle, trend, color = 'teal', tooltip }) {
@@ -109,7 +110,9 @@ function RecommendationItem({ rec }) {
           </span>
         )}
       </div>
-      <p className="text-sm text-warm-white leading-snug">{rec.action}</p>
+      <div className="prose prose-invert prose-xs max-w-none prose-p:text-warm-white prose-strong:text-teal-400 prose-ul:text-warm-white prose-li:text-warm-white prose-p:my-1 prose-ul:my-1 prose-li:my-0.5">
+        <ReactMarkdown>{rec.action}</ReactMarkdown>
+      </div>
     </div>
   )
 }
@@ -141,7 +144,7 @@ function EmptyTile({ title, message }) {
 }
 
 function EdWaitTile({ data }) {
-  if (!data || !data.levels?.length) return <EmptyTile title="ED Wait by Acuity" message="No ED wait data. Ensure fact_ed_wait_times table has data." />
+  if (!data || !data.levels?.length) return <EmptyTile title="ED Wait by Acuity" message="No ED wait data yet. Use Inject Good to add sample data." />
   const maxWait = Math.max(...data.levels.map(l => l.avg_wait), 1)
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
@@ -171,7 +174,7 @@ function EdWaitTile({ data }) {
 }
 
 function DrugCostTile({ data }) {
-  if (!data || !data.categories?.length) return <EmptyTile title="Drug Costs (30d)" message="No drug cost data. Ensure fact_drug_costs table has data." />
+  if (!data || !data.categories?.length) return <EmptyTile title="Drug Costs (30d)" message="No drug cost data yet. Use Inject Good to add sample data." />
   const topSpend = Math.max(...data.categories.map(c => c.spend), 1)
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
@@ -194,7 +197,7 @@ function DrugCostTile({ data }) {
 }
 
 function StaffingTile({ data }) {
-  if (!data || !data.departments?.length) return <EmptyTile title="Contract Labor Mix" message="No staffing data. Ensure fact_staffing table has data." />
+  if (!data || !data.departments?.length) return <EmptyTile title="Contract Labor Mix" message="No staffing data yet. Use Inject Good to add sample data." />
   return (
     <div className="bg-slate-800/30 rounded-xl p-4 border border-slate-700/30">
       <div className="flex items-center justify-between mb-3">

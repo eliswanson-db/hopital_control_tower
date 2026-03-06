@@ -18,7 +18,7 @@ env:
     value: "eswanson_demo_med_logistics_nba_vector_endpoint"
 
   - name: LLM_MODEL_ORCHESTRATOR
-    value: "databricks-gpt-oss-120b"
+    value: "databricks-claude-sonnet-4-5"
 
   - name: LLM_MODEL_RAG
     value: "databricks-claude-sonnet-4-5"

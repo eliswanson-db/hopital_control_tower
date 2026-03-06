@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { cn } from '../lib/utils'
+import ChartRenderer from './ChartRenderer'
 
 function LoadingDots({ stage }) {
   const stageLabels = {
@@ -85,7 +86,8 @@ function AgentPipeline({ trace }) {
 const isErrorMessage = (content) =>
   content?.startsWith('I encountered an error') || content?.startsWith('Deep analysis error')
 
-function Message({ message, isUser, onRetry }) {
+function Message({ message, isUser, onRetry, chart, plotLoading, onGeneratePlot }) {
+  const showPlotButton = !isUser && !isErrorMessage(message.content) && !chart && !plotLoading
   return (
     <div className={cn("message-enter max-w-4xl", isUser ? "ml-auto" : "")}>
       <div className={cn(
@@ -100,6 +102,30 @@ function Message({ message, isUser, onRetry }) {
           <div className="prose prose-invert prose-sm max-w-none prose-headings:text-warm-white prose-p:text-warm-white prose-strong:text-teal-400 prose-ul:text-warm-white prose-li:text-warm-white">
             <ReactMarkdown>{message.content}</ReactMarkdown>
           </div>
+        )}
+
+        {chart && <ChartRenderer spec={chart} />}
+
+        {chart?.no_data && (
+          <p className="mt-2 text-xs text-slate-500 italic">{chart.reason}</p>
+        )}
+
+        {plotLoading && (
+          <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+            <div className="w-3 h-3 border-2 border-teal-400 border-t-transparent rounded-full animate-spin" />
+            Generating chart...
+          </div>
+        )}
+
+        {showPlotButton && onGeneratePlot && (
+          <button onClick={onGeneratePlot}
+            className="mt-3 px-3 py-1.5 text-xs bg-slate-700/50 text-slate-300 border border-slate-600/40 rounded-lg hover:bg-teal-500/20 hover:text-teal-300 hover:border-teal-500/30 transition-all flex items-center gap-1.5"
+            title="Use an AI agent to generate a chart from this response">
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+            Generate Plot
+          </button>
         )}
 
         {!isUser && isErrorMessage(message.content) && onRetry && (
@@ -194,8 +220,11 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [loadingStage, setLoadingStage] = useState(null)
+  const [chartData, setChartData] = useState({})
+  const [plotLoading, setPlotLoading] = useState({})
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
+  const cancelledRef = useRef(false)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -211,22 +240,28 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
   }, [pendingQuery])
 
   const sendDeepAnalysis = async (text, history) => {
+    cancelledRef.current = false
     const submitRes = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text, mode: 'rag', history, stream: true }),
     })
+    if (!submitRes.ok) throw new Error(`Server error (${submitRes.status})`)
     const { task_id, error } = await submitRes.json()
     if (error || !task_id) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${error || 'No task ID returned'}` }])
+      if (!cancelledRef.current) setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${error || 'No task ID returned'}` }])
       return
     }
     setLoadingStage('starting')
     for (let i = 0; i < 150; i++) {
+      if (cancelledRef.current) return
       await new Promise(r => setTimeout(r, 2000))
+      if (cancelledRef.current) return
       const pollRes = await fetch(`/api/agent/task/${task_id}`)
+      if (!pollRes.ok) continue
       const task = await pollRes.json()
       if (task.status === 'done') {
+        if (cancelledRef.current) return
         setLoadingStage(null)
         setMessages(prev => [...prev, {
           role: 'assistant', content: task.response || 'No response',
@@ -237,14 +272,17 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
         return
       }
       if (task.status === 'error') {
+        if (cancelledRef.current) return
         setLoadingStage(null)
         setMessages(prev => [...prev, { role: 'assistant', content: `Deep analysis error: ${task.error}` }])
         return
       }
       if (task.stage) setLoadingStage(task.stage)
     }
-    setLoadingStage(null)
-    setMessages(prev => [...prev, { role: 'assistant', content: 'Deep analysis timed out after 5 minutes.' }])
+    if (!cancelledRef.current) {
+      setLoadingStage(null)
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Deep analysis timed out after 5 minutes.' }])
+    }
   }
 
   const sendMessage = async (messageText) => {
@@ -265,6 +303,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text, mode: 'orchestrator', history }),
         })
+        if (!res.ok) throw new Error(`Server error (${res.status})`)
         const data = await res.json()
         const assistantMessage = {
           role: 'assistant', content: data.response || data.error || 'No response',
@@ -278,6 +317,35 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
     } finally {
       setIsLoading(false)
       setLoadingStage(null)
+    }
+  }
+
+  const clearChat = () => {
+    cancelledRef.current = true
+    setMessages([])
+    setIsLoading(false)
+    setLoadingStage(null)
+    setChartData({})
+    setPlotLoading({})
+  }
+
+  const generatePlot = async (idx) => {
+    const msg = messages[idx]
+    if (!msg || msg.role === 'user') return
+    setPlotLoading(prev => ({ ...prev, [idx]: true }))
+    try {
+      const history = messages.slice(0, idx + 1).map(m => ({ role: m.role, content: m.content }))
+      const res = await fetch('/api/agent/plot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: msg.content, history }),
+      })
+      const spec = await res.json()
+      setChartData(prev => ({ ...prev, [idx]: spec }))
+    } catch (err) {
+      setChartData(prev => ({ ...prev, [idx]: { no_data: true, reason: err.message } }))
+    } finally {
+      setPlotLoading(prev => ({ ...prev, [idx]: false }))
     }
   }
 
@@ -309,7 +377,13 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
                   if (lastUserMsg) sendMessage(lastUserMsg.content)
                 }
               : null
-            return <Message key={idx} message={msg} isUser={msg.role === 'user'} onRetry={retryHandler} />
+            const chart = chartData[idx] && !chartData[idx].no_data ? chartData[idx] : (chartData[idx]?.no_data ? chartData[idx] : null)
+            return (
+              <Message key={idx} message={msg} isUser={msg.role === 'user'}
+                onRetry={retryHandler} chart={chart}
+                plotLoading={!!plotLoading[idx]}
+                onGeneratePlot={() => generatePlot(idx)} />
+            )
           })}
           {isLoading && (
             <div className="max-w-4xl">
@@ -352,7 +426,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
           <div className="mt-3 flex items-center justify-center gap-3 text-xs text-slate-500">
             <span>{mode === 'quick' ? 'Quick Query' : 'Deep Analysis'} mode &middot; Press Enter to send</span>
             {messages.length > 0 && (
-              <button onClick={() => setMessages([])}
+              <button onClick={clearChat}
                 className="text-slate-500 hover:text-red-400 transition-colors">
                 Clear chat
               </button>

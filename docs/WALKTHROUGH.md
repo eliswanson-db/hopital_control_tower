@@ -62,13 +62,12 @@ A 15-minute guided demo for presenting Hospital Control Tower to customers. Each
 1. Switch to **Deep Analysis** mode
 2. Click the suggestion chip: **"Why did drug costs spike in November?"**
 
-**What to expect:** SSE streaming with stage indicators:
-- "Checking prerequisites..." (2-5s)
-- "Deciding next step..." (5-10s)
-- "Creating analysis plan..." (10-15s)
-- "Gathering evidence..." (15-30s)
-- "Interpreting results..." (10-20s)
-- "Preparing final response..." (5-10s)
+**What to expect:** Stage indicators update as the analysis progresses:
+- "Starting..." (1-3s)
+- "Planning..." (5-10s)
+- "Retrieving..." (10-30s)
+- "Analyzing..." (10-20s)
+- "Responding..." (5-10s)
 
 **While waiting, explain the architecture:**
 > "Deep Analysis uses a multi-agent graph. An LLM supervisor decides what to do next -- it might ask for clarification, plan what data to gather, dispatch a retrieval agent to query SQL and vector search, then hand off to an analyst agent that interprets the evidence and writes a structured report."
@@ -91,11 +90,11 @@ A 15-minute guided demo for presenting Hospital Control Tower to customers. Each
 ### Data Injection (2 min)
 
 1. Click **Inject Anomaly** (in the Demo Tools section)
-   - Watch for the green toast: "Injected 10 anomalous encounters"
+   - Watch for the green toast confirming the injected encounters
    - Wait 2-3 seconds for the health score to update (it should drop)
 
 **Say:**
-> "For demos, we can inject test data. These 10 encounters have long LOS and are all readmissions. Watch the health score respond."
+> "For demos, we can inject test data. These encounters have long LOS and are all readmissions. The batch size is configurable in Settings. Watch the health score respond."
 
 2. **Click an alert tile** if one appears
    - This pre-fills a deep analysis query in the chat
@@ -146,7 +145,7 @@ A 15-minute guided demo for presenting Hospital Control Tower to customers. Each
 |---------|-----|
 | Health score shows `--/100` | Data tables may be empty. Click **Inject Good** a few times, then refresh the page. |
 | Deep Analysis returns an error | Try a simpler question in Quick Query mode to verify connectivity, then retry. |
-| SSE stream hangs with no stages | Wait up to 90 seconds. If still stuck, refresh and try again. The 5-minute timeout will eventually surface an error. |
+| Deep Analysis hangs with no stage updates | Wait up to 90 seconds. If still stuck, refresh and retry. The 5-minute timeout will surface an error. |
 | Dashboard tiles show "No data" | Run `databricks bundle run generate_data -t dev` or click **Inject Good** to add test data. |
 | Autonomous mode doesn't start | Check the Settings panel -- the interval may be set too high. Set to 1 minute for demos. |
 | App returns 502/503 | The app may be restarting. Wait 30 seconds and refresh. Check Databricks Apps logs if it persists. |
