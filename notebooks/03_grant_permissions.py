@@ -121,13 +121,14 @@ print(f"Encounter Vector Index: {ENCOUNTER_VECTOR_INDEX}")
 print(f"SOP Vector Index: {SOP_VECTOR_INDEX}")
 
 try:
-    from databricks.sdk.service.vectorsearch import EndpointAccessControlRequest, EndpointPermissionLevel
-    w.vector_search_endpoints.set_permissions(
-        vector_search_endpoint_id=VECTOR_ENDPOINT,
+    from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
+    w.permissions.update(
+        request_object_type="vector-search-endpoints",
+        request_object_id=VECTOR_ENDPOINT,
         access_control_list=[
-            EndpointAccessControlRequest(
+            AccessControlRequest(
                 service_principal_name=SP_NAME or APP_NAME,
-                permission_level=EndpointPermissionLevel.CAN_USE
+                permission_level=PermissionLevel.CAN_USE
             )
         ]
     )
@@ -135,9 +136,13 @@ try:
 except Exception as e:
     print(f"SKIP: Vector endpoint permission: {e}")
 
-print(f"Vector index permissions inherited from source tables:")
-print(f"  - {ENCOUNTER_VECTOR_INDEX} (from encounters_for_embedding)")
-print(f"  - {SOP_VECTOR_INDEX} (from sop_chunks)")
+print("\nGranting SELECT on vector indexes:")
+for idx_name in [ENCOUNTER_VECTOR_INDEX, SOP_VECTOR_INDEX]:
+    try:
+        spark.sql(f"GRANT SELECT ON TABLE {idx_name} TO {PRINCIPAL}")
+        print(f"  OK: SELECT on {idx_name}")
+    except Exception as e:
+        print(f"  SKIP: SELECT on {idx_name}: {e}")
 
 # COMMAND ----------
 
