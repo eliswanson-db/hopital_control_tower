@@ -33,6 +33,19 @@ const INTENT_DESCRIPTIONS = {
   general: 'General question -- allocated SQL + vector search as default tools',
 }
 
+const TOOL_DESCRIPTIONS = {
+  execute_sql: 'Runs a read-only SQL query against hospital operations tables',
+  search_encounters: 'Semantic search over patient encounter records via vector index',
+  search_sops: 'Searches Standard Operating Procedures for policy guidance',
+  analyze_cost_drivers: 'Analyzes drug cost patterns by hospital and time period',
+  analyze_los_factors: 'Examines length-of-stay drivers and discharge patterns',
+  check_ed_performance: 'Reviews ED wait times and threshold breaches by acuity',
+  check_staffing_efficiency: 'Analyzes contract labor usage and staffing costs',
+  check_operational_kpis: 'Checks key operational metrics against thresholds',
+  check_data_freshness: 'Verifies table recency and row counts',
+  write_analysis: 'Saves analysis results and recommendations to the database',
+}
+
 function AgentReasoning({ intent, toolCalls }) {
   const [open, setOpen] = useState(false)
   if (!intent) return null
@@ -147,10 +160,22 @@ function Message({ message, isUser, onRetry, chart, plotLoading, onGeneratePlot 
         )}
         
         {message.tool_calls && message.tool_calls.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {message.tool_calls.map((tool, i) => (
-              <span key={i} className="text-xs px-2 py-1 bg-teal-500/20 text-teal-300 rounded-md">{tool}</span>
-            ))}
+          <div className="mt-3 space-y-1.5">
+            <div className="flex flex-wrap gap-1.5">
+              {message.tool_calls.map((tool, i) => (
+                <span key={i} className="relative group text-xs px-2 py-1 bg-teal-500/20 text-teal-300 rounded-md cursor-help">
+                  {tool}
+                  <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2.5 py-1.5 bg-slate-900 text-slate-200 text-[11px] rounded-lg shadow-lg border border-slate-700/50 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                    {TOOL_DESCRIPTIONS[tool] || tool}
+                  </span>
+                </span>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-500 leading-relaxed">
+              {message.tool_calls.map((tool, i) => (
+                <span key={i}>{i > 0 && ' | '}<span className="text-slate-400">{tool}</span>: {TOOL_DESCRIPTIONS[tool] || 'Unknown tool'}</span>
+              ))}
+            </div>
           </div>
         )}
 

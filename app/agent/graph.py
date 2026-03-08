@@ -28,14 +28,16 @@ from .orchestrator import select_tools_for_context, get_system_prompt_for_contex
 logger = logging.getLogger(__name__)
 
 MLFLOW_ENABLED = False
+MLFLOW_EXPERIMENT_ID = None
 try:
     import mlflow
     mlflow.set_tracking_uri("databricks")
-    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    exp = mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    MLFLOW_EXPERIMENT_ID = exp.experiment_id
     mlflow.langchain.autolog(silent=True)
     trace = mlflow.trace
     MLFLOW_ENABLED = True
-    logger.info(f"MLflow tracing enabled, experiment: {MLFLOW_EXPERIMENT}")
+    logger.info(f"MLflow tracing enabled, experiment: {MLFLOW_EXPERIMENT} (id={MLFLOW_EXPERIMENT_ID})")
 except Exception as e:
     logger.warning(f"MLflow tracing not available: {e}")
     def trace(**kwargs):
@@ -52,16 +54,16 @@ for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy", "litellm"):
 
 ANALYSIS_TYPES = ["cost_monitoring", "los_analysis", "ed_performance", "staffing_analysis", "compliance_monitoring"]
 
-# Module-level progress queue -- set by invoke_deep_agent_streaming before graph runs
-_progress_queue: Optional[queue.Queue] = None
-_routing_trace: list = []
+_local = threading.local()
 
 
 def _emit_progress(stage: str, message: str, agent: str = ""):
-    if agent:
-        _routing_trace.append({"agent": agent, "action": stage, "message": message})
-    if _progress_queue is not None:
-        _progress_queue.put({"stage": stage, "message": message})
+    trace = getattr(_local, "routing_trace", None)
+    if agent and trace is not None:
+        trace.append({"agent": agent, "action": stage, "message": message})
+    q = getattr(_local, "progress_queue", None)
+    if q is not None:
+        q.put({"stage": stage, "message": message})
 
 
 _cached_llm = None
@@ -365,7 +367,7 @@ def analyst_node(state: DeepAnalysisState) -> dict:
         tools_used = []
         for msg in result.get("messages", []):
             if isinstance(msg, AIMessage):
-                if msg.content:
+                if msg.content and len(msg.content) > len(analysis):
                     analysis = msg.content
                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
                     tools_used.extend([tc.get("name", "unknown") for tc in msg.tool_calls])
@@ -494,10 +496,9 @@ def _run_deep_graph(query: str, prereq_status: str) -> Dict:
     result = graph.invoke(initial_state)
 
     response_content = ""
-    for msg in reversed(result.get("messages", [])):
-        if isinstance(msg, AIMessage) and msg.content:
+    for msg in result.get("messages", []):
+        if isinstance(msg, AIMessage) and msg.content and len(msg.content) > len(response_content):
             response_content = msg.content
-            break
     if not response_content:
         response_content = result.get("analysis_result", "Analysis complete but no output was generated.")
 
@@ -530,13 +531,11 @@ def invoke_deep_agent_streaming(message: str, history: Optional[List[Dict]] = No
         {"stage": "done", "response": "...", "tool_calls": [...]}
         {"stage": "error", "message": "..."}
     """
-    global _progress_queue, _routing_trace
     q = queue.Queue()
-    _progress_queue = q
-    _routing_trace = []
 
     def _run():
-        global _progress_queue, _routing_trace
+        _local.progress_queue = q
+        _local.routing_trace = []
         try:
             _emit_progress("starting", "Checking prerequisites...", agent="system")
             prereq_status = check_prerequisite_analyses()
@@ -544,13 +543,13 @@ def invoke_deep_agent_streaming(message: str, history: Optional[List[Dict]] = No
             result = _run_deep_graph(query, prereq_status)
             q.put({"stage": "done", "response": result["response"],
                    "tool_calls": result.get("tool_calls", []),
-                   "routing_trace": list(_routing_trace)})
+                   "routing_trace": list(_local.routing_trace)})
         except Exception as e:
             logger.error(f"Streaming deep analysis error: {e}", exc_info=True)
             q.put({"stage": "error", "message": str(e)})
         finally:
-            _progress_queue = None
-            _routing_trace = []
+            _local.progress_queue = None
+            _local.routing_trace = []
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

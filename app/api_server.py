@@ -1,15 +1,23 @@
 """Flask server for Hospital Control Tower App."""
 import os
+import re
 import json
 import time
 import uuid
 import queue
 import logging
+import functools
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from databricks.sdk.service.sql import Format, Disposition
+
+UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+VALID_ANALYSIS_TYPES = {
+    "cost_monitoring", "los_analysis", "ed_performance", "staffing_analysis",
+    "next_best_action_report", "compliance_monitoring", "strategy_optimization", "learning_reflection",
+}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +35,8 @@ CORS(app)
 @app.errorhandler(Exception)
 def handle_exception(e):
     code = getattr(e, "code", 500)
-    return jsonify({"error": str(e)}), code
+    logger.error(f"Unhandled error: {e}", exc_info=True)
+    return jsonify({"error": "Internal server error"}), code
 
 
 from agent.config import (
@@ -36,6 +45,16 @@ from agent.config import (
     ED_WAIT_TABLE, STAFFING_TABLE,
     get_workspace_client, validate_config,
 )
+
+DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() == "true"
+
+def require_demo_mode(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if not DEMO_MODE:
+            return jsonify({"error": "Data mutation disabled (DEMO_MODE=false)"}), 403
+        return f(*args, **kwargs)
+    return wrapper
 
 _agent_loaded = False
 _invoke_agent = None
@@ -298,8 +317,17 @@ def health_check():
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
-    return jsonify({"catalog": CATALOG, "schema": SCHEMA,
-                    "warehouse_id": WAREHOUSE_ID[:8] + "..." if WAREHOUSE_ID else None})
+    from agent.graph import MLFLOW_ENABLED, MLFLOW_EXPERIMENT_ID
+    host = os.environ.get("DATABRICKS_HOST", "")
+    exp_url = None
+    if host and MLFLOW_EXPERIMENT_ID:
+        exp_url = f"{host.rstrip('/')}/ml/experiments/{MLFLOW_EXPERIMENT_ID}/traces"
+    return jsonify({
+        "catalog": CATALOG, "schema": SCHEMA,
+        "warehouse_id": WAREHOUSE_ID[:8] + "..." if WAREHOUSE_ID else None,
+        "mlflow_enabled": MLFLOW_ENABLED,
+        "mlflow_experiment_url": exp_url,
+    })
 
 
 @app.route("/api/agent/chat", methods=["POST"])
@@ -479,6 +507,7 @@ def autonomous_check_now():
 
 
 @app.route("/api/data/inject-anomaly", methods=["POST"])
+@require_demo_mode
 def inject_anomaly():
     """Insert anomalous data across all tables -- high LOS, high costs, long ED waits, high contract labor."""
     try:
@@ -530,6 +559,7 @@ def inject_anomaly():
 
 
 @app.route("/api/data/inject-good", methods=["POST"])
+@require_demo_mode
 def inject_good_data():
     """Insert healthy data across all tables -- short LOS, low costs, fast ED, low contract labor."""
     try:
@@ -580,6 +610,7 @@ def inject_good_data():
 
 
 @app.route("/api/data/reset", methods=["POST"])
+@require_demo_mode
 def reset_demo_data():
     """Delete all injected (GOOD_/ANOM_) data and clear analysis_outputs."""
     try:
@@ -707,8 +738,10 @@ def get_alerts():
 def get_latest_analysis():
     try:
         w = get_workspace_client()
-        limit = request.args.get("limit", 10, type=int)
+        limit = min(request.args.get("limit", 10, type=int), 100)
         analysis_type = request.args.get("type")
+        if analysis_type and analysis_type not in VALID_ANALYSIS_TYPES:
+            return jsonify({"error": "Invalid analysis type"}), 400
         where_clause = f"WHERE analysis_type = '{analysis_type}'" if analysis_type else ""
         query = f"""SELECT id, encounter_id, analysis_type, insights, recommendations, created_at, agent_mode
         FROM {ANALYSIS_TABLE} {where_clause} ORDER BY created_at DESC LIMIT {limit}"""
@@ -737,12 +770,14 @@ def get_pending_recommendations():
 
 @app.route("/api/recommendations/<rec_id>/approve", methods=["POST"])
 def approve_recommendation(rec_id):
+    if not UUID_RE.match(rec_id):
+        return jsonify({"error": "Invalid recommendation ID"}), 400
     try:
         data = request.json or {}
-        reviewed_by = data.get("reviewed_by", "unknown")
-        engineer_notes = data.get("engineer_notes", "")
+        reviewed_by = data.get("reviewed_by", "unknown").replace("'", "''")
+        engineer_notes = data.get("engineer_notes", "").replace("'", "''")
         query = f"""UPDATE {ANALYSIS_TABLE} SET status = 'approved', reviewed_by = '{reviewed_by}',
-        reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes.replace("'", "''")}' WHERE id = '{rec_id}'"""
+        reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes}' WHERE id = '{rec_id}'"""
         _exec_sql(query)
         return jsonify({"success": True, "id": rec_id, "status": "approved"})
     except Exception as e:
@@ -751,12 +786,14 @@ def approve_recommendation(rec_id):
 
 @app.route("/api/recommendations/<rec_id>/reject", methods=["POST"])
 def reject_recommendation(rec_id):
+    if not UUID_RE.match(rec_id):
+        return jsonify({"error": "Invalid recommendation ID"}), 400
     try:
         data = request.json or {}
-        reviewed_by = data.get("reviewed_by", "unknown")
-        engineer_notes = data.get("engineer_notes", "")
+        reviewed_by = data.get("reviewed_by", "unknown").replace("'", "''")
+        engineer_notes = data.get("engineer_notes", "").replace("'", "''")
         query = f"""UPDATE {ANALYSIS_TABLE} SET status = 'rejected', reviewed_by = '{reviewed_by}',
-        reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes.replace("'", "''")}' WHERE id = '{rec_id}'"""
+        reviewed_at = current_timestamp(), engineer_notes = '{engineer_notes}' WHERE id = '{rec_id}'"""
         _exec_sql(query)
         return jsonify({"success": True, "id": rec_id, "status": "rejected"})
     except Exception as e:
@@ -1166,6 +1203,7 @@ def record_autonomous_result(message, issues_found):
 
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+VISIBLE_DOCS = {"WALKTHROUGH", "AGENT_ARCHITECTURE"}
 
 
 @app.route("/api/docs", methods=["GET"])
@@ -1176,6 +1214,8 @@ def list_docs():
         for f in sorted(os.listdir(DOCS_DIR)):
             if f.endswith(".md"):
                 name = f[:-3]
+                if name not in VISIBLE_DOCS:
+                    continue
                 title = name.replace("_", " ").title()
                 docs.append({"name": name, "filename": f, "title": title})
     return jsonify({"docs": docs})

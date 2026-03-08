@@ -1,4 +1,5 @@
 """Agent tools for SQL execution, vector search, and hospital operations analysis."""
+import re
 import json
 import uuid
 import logging
@@ -8,6 +9,7 @@ from langchain_core.tools import tool
 from databricks.sdk.service.sql import Format, Disposition
 
 from .config import (
+    CATALOG, SCHEMA,
     WAREHOUSE_ID, VECTOR_ENDPOINT, VECTOR_INDEX, SOP_VECTOR_INDEX,
     ENCOUNTERS_TABLE, DRUG_COSTS_TABLE, STAFFING_TABLE,
     ED_WAIT_TABLE, KPI_TABLE, ANALYSIS_TABLE,
@@ -15,6 +17,12 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SAFE_IDENTIFIER = re.compile(r'^[A-Za-z0-9_ ]+$')
+
+def _validate_identifier(value, name):
+    if value and not _SAFE_IDENTIFIER.match(value):
+        raise ValueError(f"Invalid {name}: {value!r}")
 
 
 def _execute_query(query: str, wait_timeout: str = "30s") -> dict:
@@ -35,6 +43,24 @@ def _execute_query(query: str, wait_timeout: str = "30s") -> dict:
         return {"success": False, "error": str(result.status.error)}
 
 
+ALLOWED_TABLES = {
+    "dim_encounters", "fact_drug_costs", "fact_staffing",
+    "fact_ed_wait_times", "fact_operational_kpis", "hospital_overview", "analysis_outputs",
+}
+
+def _check_table_allowlist(query: str) -> Optional[str]:
+    """Return an error message if the query references tables not in the allowlist."""
+    q = query.lower()
+    prefix = f"{CATALOG.lower()}.{SCHEMA.lower()}."
+    for table in ALLOWED_TABLES:
+        q = q.replace(f"{prefix}{table}", table)
+    refs = re.findall(r'\bfrom\s+(\w+)|\bjoin\s+(\w+)', q)
+    for match in refs:
+        name = match[0] or match[1]
+        if name not in ALLOWED_TABLES:
+            return f"Table '{name}' is not in the allowed list"
+    return None
+
 @tool
 def execute_sql(query: str) -> str:
     """Execute read-only SQL query against hospital operations data.
@@ -54,6 +80,9 @@ def execute_sql(query: str) -> str:
     for keyword in blocked:
         if keyword in query_upper:
             return json.dumps({"error": f"Query contains blocked keyword: {keyword}"})
+    table_err = _check_table_allowlist(query)
+    if table_err:
+        return json.dumps({"error": table_err})
     try:
         result = _execute_query(query)
         if result["success"]:
@@ -111,6 +140,9 @@ def analyze_cost_drivers(hospital: Optional[str] = None, month: Optional[int] = 
     - Comparison across hospitals
     """
     try:
+        _validate_identifier(hospital, "hospital")
+        if month is not None and not (1 <= month <= 12):
+            return json.dumps({"error": "month must be between 1 and 12"})
         where_clauses = []
         if hospital:
             where_clauses.append(f"hospital = '{hospital}'")
@@ -158,6 +190,7 @@ def analyze_los_factors(hospital: Optional[str] = None) -> str:
     - Payer mix impact on LOS
     """
     try:
+        _validate_identifier(hospital, "hospital")
         where_sql = f"WHERE hospital = '{hospital}'" if hospital else ""
 
         # LOS by hospital and department
@@ -208,6 +241,7 @@ def check_ed_performance(hospital: Optional[str] = None) -> str:
     - Hospital comparison
     """
     try:
+        _validate_identifier(hospital, "hospital")
         where_sql = f"WHERE hospital = '{hospital}'" if hospital else ""
 
         # Wait times by acuity
@@ -251,6 +285,8 @@ def check_staffing_efficiency(hospital: Optional[str] = None, department: Option
     - Trends over time
     """
     try:
+        _validate_identifier(hospital, "hospital")
+        _validate_identifier(department, "department")
         where_clauses = []
         if hospital:
             where_clauses.append(f"hospital = '{hospital}'")

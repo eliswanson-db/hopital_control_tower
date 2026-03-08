@@ -31,6 +31,7 @@ function App() {
   const [showGuide, setShowGuide] = useState(() => !localStorage.getItem('demo_guide_seen'))
   const [showDocs, setShowDocs] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [tracesUrl, setTracesUrl] = useState(null)
   const toastIdRef = useRef(0)
 
   const addToast = useCallback((message, type = 'success') => {
@@ -69,6 +70,9 @@ function App() {
   useEffect(() => {
     fetchAutonomousStatus()
     fetchHealthScore()
+    fetch('/api/config').then(r => r.json()).then(d => {
+      if (d.mlflow_experiment_url) setTracesUrl(d.mlflow_experiment_url)
+    }).catch(() => {})
     const interval = setInterval(() => {
       fetchAutonomousStatus()
       fetchHealthScore()
@@ -206,6 +210,7 @@ function App() {
         loadingStates={loadingStates}
         onOpenGuide={() => setShowGuide(true)}
         onOpenDocs={() => setShowDocs(true)}
+        tracesUrl={tracesUrl}
       />
 
       <main className="flex-1 flex overflow-hidden">
