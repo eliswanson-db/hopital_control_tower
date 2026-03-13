@@ -612,11 +612,11 @@ def inject_good_data():
 @app.route("/api/data/reset", methods=["POST"])
 @require_demo_mode
 def reset_demo_data():
-    """Delete all injected (GOOD_/ANOM_) data and clear analysis_outputs."""
+    """Delete all injected (GOOD_/ANOM_/BFILL_) data and clear analysis_outputs."""
     try:
-        _exec_sql(f"DELETE FROM {ENCOUNTERS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
-        _exec_sql(f"DELETE FROM {ED_WAIT_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
-        _exec_sql(f"DELETE FROM {DRUG_COSTS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%'")
+        _exec_sql(f"DELETE FROM {ENCOUNTERS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%' OR encounter_id LIKE 'BFILL_%'")
+        _exec_sql(f"DELETE FROM {ED_WAIT_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%' OR encounter_id LIKE 'BFILL_%'")
+        _exec_sql(f"DELETE FROM {DRUG_COSTS_TABLE} WHERE encounter_id LIKE 'GOOD_%' OR encounter_id LIKE 'ANOM_%' OR encounter_id LIKE 'BFILL_%'")
         _exec_sql(f"DELETE FROM {STAFFING_TABLE} WHERE date >= CURRENT_DATE - INTERVAL 7 DAYS AND hospital IN ('Hospital_A','Hospital_B','Hospital_C')")
         try:
             _exec_sql(f"DELETE FROM {ANALYSIS_TABLE} WHERE 1=1")
@@ -626,6 +626,96 @@ def reset_demo_data():
         return jsonify({"success": True, "message": "Injected data cleared, analyses removed, dates refreshed"})
     except Exception as e:
         logger.error(f"Reset data error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/backfill", methods=["POST"])
+@require_demo_mode
+def backfill_data():
+    """Generate baseline-distribution data for every missing day between last data and today."""
+    try:
+        import random
+        cols, rows = _run_sql(f"SELECT MAX(DATE(admit_date)) FROM {ENCOUNTERS_TABLE}")
+        if not rows or not rows[0] or rows[0][0] is None:
+            return jsonify({"error": "No existing data to backfill from"}), 400
+        last_date = datetime.strptime(str(rows[0][0]), "%Y-%m-%d").date()
+        today = datetime.utcnow().date()
+        gap_days = (today - last_date).days
+        if gap_days <= 0:
+            return jsonify({"success": True, "days_filled": 0, "encounters": 0, "message": "Data is already current"})
+
+        hospitals = ["Hospital_A", "Hospital_B", "Hospital_C"]
+        depts = ["Cardiology", "Orthopedics", "General_Medicine", "Neurology", "Pediatrics", "Emergency"]
+        payers = ["BlueCross", "Medicare", "Aetna", "UnitedHealth", "Cigna"]
+        drug_cats = ["Antibiotics", "Analgesics", "Cardiovascular", "Oncology", "Respiratory"]
+        drug_names = ["Amoxicillin", "Ibuprofen", "Lisinopril", "Metformin", "Atorvastatin",
+                      "Omeprazole", "Amlodipine", "Albuterol", "Gabapentin", "Losartan"]
+        staff_types = ["full_time", "contract"]
+        ts = int(datetime.utcnow().timestamp())
+
+        enc_rows, ed_rows, drug_rows, staff_rows = [], [], [], []
+        enc_count = 0
+        staffing_weeks_done = set()
+
+        for day_offset in range(1, gap_days + 1):
+            target_date = last_date + timedelta(days=day_offset)
+            daily_encounters = random.randint(1, 3)
+            for i in range(daily_encounters):
+                los = round(random.uniform(1.5, 8.0), 1)
+                is_readmit = random.random() < 0.08
+                hosp = random.choice(hospitals)
+                dept = random.choice(depts)
+                admit = (target_date - timedelta(days=int(los))).strftime("%Y-%m-%d")
+                discharge = target_date.strftime("%Y-%m-%d")
+                eid = f"BFILL_{ts}_{enc_count:04d}"
+                enc_rows.append(
+                    f"('{eid}', 'PAT_BF_{enc_count}', '{hosp}', '{dept}', '{random.choice(payers)}', "
+                    f"'{admit}', '{discharge}', {los}, {str(is_readmit).lower()}, 'Dr. Baseline')"
+                )
+                if random.random() < 0.6:
+                    acuity = random.randint(1, 5)
+                    wait = round(random.uniform(5, 90 if acuity > 2 else 30), 1)
+                    arrival = f"{target_date} {random.randint(0,23):02d}:{random.randint(0,59):02d}:00"
+                    ed_rows.append(f"('{eid}', '{hosp}', {acuity}, {wait}, TIMESTAMP'{arrival}')")
+                for _ in range(random.randint(1, 3)):
+                    drug = random.choice(drug_names)
+                    cat = random.choice(drug_cats)
+                    qty = random.randint(1, 30)
+                    unit_cost = round(random.uniform(5, 200), 2)
+                    total = round(qty * unit_cost, 2)
+                    drug_rows.append(f"('{eid}', '{drug}', '{cat}', {qty}, {unit_cost}, {total}, '{target_date}')")
+                enc_count += 1
+
+            week_key = target_date.isocalendar()[1]
+            if week_key not in staffing_weeks_done:
+                staffing_weeks_done.add(week_key)
+                for dept in depts:
+                    for st in staff_types:
+                        fte = round(random.uniform(5, 30), 1)
+                        staff_rows.append(f"('{random.choice(hospitals)}', '{dept}', '{st}', {fte}, '{target_date}')")
+
+        if enc_rows:
+            for chunk_start in range(0, len(enc_rows), 500):
+                chunk = enc_rows[chunk_start:chunk_start + 500]
+                _exec_sql(f"INSERT INTO {ENCOUNTERS_TABLE} (encounter_id, patient_id, hospital, department, payer, "
+                          f"admit_date, discharge_date, los_days, is_readmission, attending_physician) VALUES {', '.join(chunk)}")
+        if ed_rows:
+            for chunk_start in range(0, len(ed_rows), 500):
+                chunk = ed_rows[chunk_start:chunk_start + 500]
+                _exec_sql(f"INSERT INTO {ED_WAIT_TABLE} (encounter_id, hospital, acuity_level, wait_minutes, arrival_time) VALUES {', '.join(chunk)}")
+        if drug_rows:
+            for chunk_start in range(0, len(drug_rows), 500):
+                chunk = drug_rows[chunk_start:chunk_start + 500]
+                _exec_sql(f"INSERT INTO {DRUG_COSTS_TABLE} (encounter_id, drug_name, drug_category, quantity, unit_cost, total_cost, date) VALUES {', '.join(chunk)}")
+        if staff_rows:
+            for chunk_start in range(0, len(staff_rows), 500):
+                chunk = staff_rows[chunk_start:chunk_start + 500]
+                _exec_sql(f"INSERT INTO {STAFFING_TABLE} (hospital, department, staff_type, fte_count, date) VALUES {', '.join(chunk)}")
+
+        logger.info(f"BACKFILL: Filled {gap_days} days with {enc_count} encounters, {len(ed_rows)} ED, {len(drug_rows)} drugs, {len(staff_rows)} staffing")
+        return jsonify({"success": True, "days_filled": gap_days, "encounters": enc_count})
+    except Exception as e:
+        logger.error(f"Backfill error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 

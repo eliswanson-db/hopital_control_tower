@@ -250,6 +250,8 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const cancelledRef = useRef(false)
+  const modeRef = useRef(mode)
+  useEffect(() => { modeRef.current = mode }, [mode])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -320,7 +322,7 @@ export default function ConversationView({ mode, healthScore, onRefresh, pending
     setLoadingStage(null)
     try {
       const history = messages.map(m => ({ role: m.role, content: m.content }))
-      if (mode !== 'quick') {
+      if (modeRef.current !== 'quick') {
         await sendDeepAnalysis(text, history)
       } else {
         const res = await fetch('/api/agent/chat', {

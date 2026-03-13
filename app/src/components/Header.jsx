@@ -18,7 +18,7 @@ function formatRemaining(autoStopAt) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
-export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData, onResetData, loadingStates = {}, onOpenGuide, onOpenDocs, tracesUrl }) {
+export default function Header({ mode, setMode, autonomousStatus, onToggleAutonomous, onOpenSettings, healthScore, onCheckHealth, onInjectAnomaly, onInjectGoodData, onResetData, onBackfillData, loadingStates = {}, onOpenGuide, onOpenDocs }) {
   const isRunning = autonomousStatus?.is_running && !autonomousStatus?.is_paused
   const remaining = isRunning ? formatRemaining(autonomousStatus?.auto_stop_at) : null
   
@@ -131,6 +131,16 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                 {loadingStates.reset && <Spinner />}
                 Reset
               </button>
+              <button
+                onClick={onBackfillData}
+                disabled={loadingStates.backfill}
+                className={cn("px-2.5 py-1.5 rounded-lg text-xs font-medium bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 transition-all flex items-center gap-1.5",
+                  loadingStates.backfill && "opacity-60 cursor-not-allowed")}
+                title="Generate baseline data for all missing days up to today"
+              >
+                {loadingStates.backfill && <Spinner />}
+                Backfill
+              </button>
             </div>
 
             <div className="flex items-center gap-2 bg-slate-800/50 rounded-xl px-4 py-2">
@@ -171,19 +181,6 @@ export default function Header({ mode, setMode, autonomousStatus, onToggleAutono
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
               </svg>
             </button>
-            {tracesUrl && (
-              <a
-                href={tracesUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="p-2 text-slate-400 hover:text-warm-white hover:bg-slate-800/50 rounded-lg transition-all"
-                title="View MLflow traces"
-              >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </a>
-            )}
             <button
               onClick={onOpenSettings}
               className="p-2 text-slate-400 hover:text-warm-white hover:bg-slate-800/50 rounded-lg transition-all"

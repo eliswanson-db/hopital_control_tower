@@ -69,4 +69,6 @@ All three modes share:
 - **Lakebase (PostgreSQL)** as a low-latency operational store (with UC fallback)
 - **MLflow Tracing** for observability across all agent calls
 
+> **Note on Unity Catalog tools:** Agent tools in this demo use the Databricks SDK and Statement Execution API directly rather than UC Functions. This is intentional for portability -- the demo can run across workspaces without registering UC Functions first. In a production deployment, wrapping tools as UC Functions would add governance (lineage tracking, access control, and discoverability) and enable use with Databricks Agent Framework's built-in UC tool integration.
+
 See the project README for full visual architecture diagrams.

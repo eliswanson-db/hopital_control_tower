@@ -31,7 +31,6 @@ function App() {
   const [showGuide, setShowGuide] = useState(() => !localStorage.getItem('demo_guide_seen'))
   const [showDocs, setShowDocs] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
-  const [tracesUrl, setTracesUrl] = useState(null)
   const toastIdRef = useRef(0)
 
   const addToast = useCallback((message, type = 'success') => {
@@ -70,9 +69,7 @@ function App() {
   useEffect(() => {
     fetchAutonomousStatus()
     fetchHealthScore()
-    fetch('/api/config').then(r => r.json()).then(d => {
-      if (d.mlflow_experiment_url) setTracesUrl(d.mlflow_experiment_url)
-    }).catch(() => {})
+    fetch('/api/config').catch(() => {})
     const interval = setInterval(() => {
       fetchAutonomousStatus()
       fetchHealthScore()
@@ -169,6 +166,24 @@ function App() {
     }
   }
 
+  const backfillData = async () => {
+    setLoading('backfill', true)
+    try {
+      const res = await fetch('/api/data/backfill', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && !data.error) {
+        addToast(`Backfilled ${data.days_filled} days (${data.encounters} encounters)`)
+        setTimeout(() => { fetchHealthScore(); setRefreshKey(k => k + 1) }, 2000)
+      } else {
+        addToast(`Backfill failed: ${data.error || res.statusText}`, 'error')
+      }
+    } catch (err) {
+      addToast(`Backfill failed: ${err.message}`, 'error')
+    } finally {
+      setLoading('backfill', false)
+    }
+  }
+
   // Poll autonomous latest result for toast notifications
   const lastAutoTs = useRef(null)
   useEffect(() => {
@@ -207,10 +222,10 @@ function App() {
         onInjectAnomaly={injectAnomaly}
         onInjectGoodData={injectGoodData}
         onResetData={resetDemoData}
+        onBackfillData={backfillData}
         loadingStates={loadingStates}
         onOpenGuide={() => setShowGuide(true)}
         onOpenDocs={() => setShowDocs(true)}
-        tracesUrl={tracesUrl}
       />
 
       <main className="flex-1 flex overflow-hidden">
