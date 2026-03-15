@@ -1,8 +1,8 @@
 resources:
   apps:
-    medical_logistics_nba_app:
-      name: "${bundle.target}-hospital-control-tower"
-      description: "AI-powered operations intelligence for hospital logistics"
+    investment_intel_app:
+      name: "${bundle.target}-investment-intel"
+      description: "AI-powered investment portfolio intelligence"
       source_code_path: ../app
 
       resources:
@@ -10,3 +10,7 @@ resources:
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: "CAN_USE"
+        - name: embedding_model
+          serving_endpoint:
+            name: databricks-gte-large-en
+            permission: "CAN_QUERY"

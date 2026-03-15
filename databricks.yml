@@ -18,9 +18,9 @@ targets:
       host: https://fe-vm-vdm-classic-q6xfh3.cloud.databricks.com/ # workspace URL
     variables:
       catalog: eswanson_demo # Unity Catalog name
-      schema: med_logistics_nba
+      schema: investment_intel
       warehouse_id: 3abb59fcfb739e0d # SQL Warehouse ID
-      vector_search_endpoint: eswanson_demo_med_logistics_nba_vector_endpoint # Vector Search endpoint name
+      vector_search_endpoint: eswanson_demo_investment_intel_vector_endpoint # Vector Search endpoint name
       node_type_id: i3.xlarge
 
   prod:

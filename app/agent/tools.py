@@ -1,4 +1,4 @@
-"""Agent tools for SQL execution, vector search, and hospital operations analysis."""
+"""Agent tools for SQL execution, vector search, and investment portfolio analysis."""
 import re
 import json
 import uuid
@@ -11,8 +11,8 @@ from databricks.sdk.service.sql import Format, Disposition
 from .config import (
     CATALOG, SCHEMA,
     WAREHOUSE_ID, VECTOR_ENDPOINT, VECTOR_INDEX, SOP_VECTOR_INDEX,
-    ENCOUNTERS_TABLE, DRUG_COSTS_TABLE, STAFFING_TABLE,
-    ED_WAIT_TABLE, KPI_TABLE, ANALYSIS_TABLE,
+    FUNDS_TABLE, PERFORMANCE_TABLE, HOLDINGS_TABLE,
+    FLOWS_TABLE, KPI_TABLE, ANALYSIS_TABLE,
     get_workspace_client,
 )
 
@@ -44,8 +44,8 @@ def _execute_query(query: str, wait_timeout: str = "30s") -> dict:
 
 
 ALLOWED_TABLES = {
-    "dim_encounters", "fact_drug_costs", "fact_staffing",
-    "fact_ed_wait_times", "fact_operational_kpis", "hospital_overview", "analysis_outputs",
+    "dim_funds", "fact_fund_performance", "fact_portfolio_holdings",
+    "fact_fund_flows", "fact_portfolio_kpis", "portfolio_overview", "analysis_outputs",
 }
 
 def _check_table_allowlist(query: str) -> Optional[str]:
@@ -63,15 +63,15 @@ def _check_table_allowlist(query: str) -> Optional[str]:
 
 @tool
 def execute_sql(query: str) -> str:
-    """Execute read-only SQL query against hospital operations data.
+    """Execute read-only SQL query against investment portfolio data.
 
     Available tables:
-    - dim_encounters: Patient encounters (encounter_id, patient_id, hospital, department, admit_date, discharge_date, los_days, discharge_day_of_week, payer, drg_code, attending_physician, is_readmission)
-    - fact_drug_costs: Drug costs (encounter_id, date, hospital, department, drug_name, drug_category, unit_cost, quantity, total_cost)
-    - fact_staffing: Staffing data (date, hospital, department, staff_type, fte_count, cost_per_fte, total_cost)
-    - fact_ed_wait_times: ED wait times (encounter_id, hospital, arrival_time, triage_time, provider_seen_time, disposition_time, wait_minutes, acuity_level)
-    - fact_operational_kpis: Daily KPIs (date, hospital, department, avg_los, avg_ed_wait_minutes, bed_utilization_pct, contract_labor_pct, drug_cost_per_encounter, readmission_rate)
-    - hospital_overview: Summary VIEW (hospital, total_encounters, avg_los, readmission_rate_pct, department_count, physician_count)
+    - dim_funds: Fund dimension (fund_id, fund_name, manager_name, strategy, vintage_year, aum, commitment, status, domicile, inception_date)
+    - fact_fund_performance: Monthly returns (fund_id, date, nav, monthly_return, ytd_return, itd_return, benchmark_return, alpha)
+    - fact_portfolio_holdings: Position holdings (fund_id, date, position_name, sector, geography, pct_nav, market_value, change_from_prior)
+    - fact_fund_flows: Capital flows (fund_id, date, capital_calls, distributions, net_flow, commitment_remaining, liquidity_terms)
+    - fact_portfolio_kpis: Portfolio KPIs (date, portfolio_segment, total_aum, weighted_avg_return, concentration_top5_pct, benchmark_spread, manager_count)
+    - portfolio_overview: Summary VIEW (strategy, fund_count, total_aum, avg_aum, manager_count, watchlist_count)
     """
     query_upper = query.strip().upper()
     if not query_upper.startswith("SELECT"):
@@ -94,13 +94,13 @@ def execute_sql(query: str) -> str:
 
 
 @tool
-def search_encounters(query: str, num_results: int = 5) -> str:
-    """Search patient encounters using semantic similarity.
+def search_fund_documents(query: str, num_results: int = 5) -> str:
+    """Search fund documents (memos, letters, pitch decks) using semantic similarity.
 
     Use natural language to describe what you're looking for:
-    - "encounters with high LOS in cardiology"
-    - "readmissions at Hospital A in November"
-    - "emergency department visits with long wait times"
+    - "manager outlook for 2026 from MedVenture Alpha"
+    - "fund performance highlights and key drivers"
+    - "risk factors and portfolio concentration"
     """
     num_results = min(max(num_results, 1), 20)
     try:
@@ -109,7 +109,7 @@ def search_encounters(query: str, num_results: int = 5) -> str:
         index = vsc.get_index(endpoint_name=VECTOR_ENDPOINT, index_name=VECTOR_INDEX)
         results = index.similarity_search(
             query_text=query,
-            columns=["encounter_id", "text_content", "hospital", "department", "los_days", "is_readmission"],
+            columns=["fund_id", "text_content", "manager_name", "strategy", "doc_type"],
             num_results=num_results,
         )
         matches = []
@@ -117,12 +117,11 @@ def search_encounters(query: str, num_results: int = 5) -> str:
             if len(row) >= 2:
                 matches.append({
                     "score": row[0] if isinstance(row[0], (int, float)) else None,
-                    "encounter_id": row[1] if len(row) > 1 else None,
+                    "fund_id": row[1] if len(row) > 1 else None,
                     "text_content": row[2] if len(row) > 2 else None,
-                    "hospital": row[3] if len(row) > 3 else None,
-                    "department": row[4] if len(row) > 4 else None,
-                    "los_days": row[5] if len(row) > 5 else None,
-                    "is_readmission": row[6] if len(row) > 6 else None,
+                    "manager_name": row[3] if len(row) > 3 else None,
+                    "strategy": row[4] if len(row) > 4 else None,
+                    "doc_type": row[5] if len(row) > 5 else None,
                 })
         return json.dumps({"matches": matches, "query": query})
     except Exception as e:
@@ -130,216 +129,210 @@ def search_encounters(query: str, num_results: int = 5) -> str:
 
 
 @tool
-def analyze_cost_drivers(hospital: Optional[str] = None, month: Optional[int] = None) -> str:
-    """Analyze drug cost drivers by hospital and time period.
+def analyze_performance_drivers(fund_id: Optional[str] = None, strategy: Optional[str] = None) -> str:
+    """Analyze fund performance drivers and return attribution.
 
     Identifies:
-    - Top drug categories by total spend
-    - Cost trends over time
-    - Anomalous cost spikes
-    - Comparison across hospitals
+    - Top/bottom performing funds by return
+    - Performance vs benchmark (alpha generation)
+    - Return trends over time
+    - Strategy-level comparisons
     """
     try:
-        _validate_identifier(hospital, "hospital")
-        if month is not None and not (1 <= month <= 12):
-            return json.dumps({"error": "month must be between 1 and 12"})
+        _validate_identifier(fund_id, "fund_id")
+        _validate_identifier(strategy, "strategy")
         where_clauses = []
-        if hospital:
-            where_clauses.append(f"hospital = '{hospital}'")
-        if month:
-            where_clauses.append(f"MONTH(date) = {month}")
+        if fund_id:
+            where_clauses.append(f"p.fund_id = '{fund_id}'")
+        if strategy:
+            where_clauses.append(f"f.strategy = '{strategy}'")
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-        # Top drugs by cost
-        top_drugs_query = f"""
-        SELECT drug_category, drug_name, SUM(total_cost) as total_spend,
-               COUNT(*) as order_count, AVG(unit_cost) as avg_unit_cost
-        FROM {DRUG_COSTS_TABLE} {where_sql}
-        GROUP BY drug_category, drug_name
-        ORDER BY total_spend DESC LIMIT 15
+        top_funds_query = f"""
+        SELECT f.fund_name, f.manager_name, f.strategy,
+               ROUND(AVG(p.monthly_return) * 12 * 100, 2) as annualized_return_pct,
+               ROUND(AVG(p.alpha) * 12 * 100, 2) as annualized_alpha_pct,
+               COUNT(*) as months_reported
+        FROM {PERFORMANCE_TABLE} p JOIN {FUNDS_TABLE} f ON p.fund_id = f.fund_id
+        {where_sql}
+        GROUP BY f.fund_name, f.manager_name, f.strategy
+        ORDER BY annualized_return_pct DESC LIMIT 15
         """
-        top_drugs = _execute_query(top_drugs_query)
+        top_funds = _execute_query(top_funds_query)
 
-        # Monthly trend
         trend_query = f"""
-        SELECT MONTH(date) as month, hospital, SUM(total_cost) as monthly_spend,
-               COUNT(DISTINCT encounter_id) as encounter_count,
-               SUM(total_cost) / COUNT(DISTINCT encounter_id) as cost_per_encounter
-        FROM {DRUG_COSTS_TABLE} {where_sql}
-        GROUP BY MONTH(date), hospital ORDER BY month
+        SELECT MONTH(p.date) as month, f.strategy,
+               ROUND(AVG(p.monthly_return) * 100, 3) as avg_monthly_return_pct,
+               ROUND(AVG(p.alpha) * 100, 3) as avg_alpha_pct
+        FROM {PERFORMANCE_TABLE} p JOIN {FUNDS_TABLE} f ON p.fund_id = f.fund_id
+        {where_sql}
+        GROUP BY MONTH(p.date), f.strategy ORDER BY month
         """
         trend = _execute_query(trend_query)
 
         return json.dumps({
-            "top_drugs": top_drugs.get("rows", []),
+            "top_funds": top_funds.get("rows", []),
             "monthly_trend": trend.get("rows", []),
-            "filters": {"hospital": hospital, "month": month}
+            "filters": {"fund_id": fund_id, "strategy": strategy}
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 @tool
-def analyze_los_factors(hospital: Optional[str] = None) -> str:
-    """Analyze length of stay drivers and patterns.
+def analyze_concentration(fund_id: Optional[str] = None) -> str:
+    """Analyze portfolio concentration risk at fund and position level.
 
     Examines:
-    - LOS by hospital, department, day of week
-    - Discharge day patterns (Monday effect)
-    - Relationship between LOS and readmission
-    - Payer mix impact on LOS
+    - Top positions by % of NAV
+    - Sector concentration
+    - Geographic concentration
+    - Fund-level concentration within strategy
     """
     try:
-        _validate_identifier(hospital, "hospital")
-        where_sql = f"WHERE hospital = '{hospital}'" if hospital else ""
+        _validate_identifier(fund_id, "fund_id")
+        where_sql = f"WHERE fund_id = '{fund_id}'" if fund_id else ""
 
-        # LOS by hospital and department
-        dept_query = f"""
-        SELECT hospital, department, ROUND(AVG(los_days), 1) as avg_los,
-               COUNT(*) as encounter_count,
-               ROUND(SUM(CASE WHEN is_readmission THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as readmit_pct
-        FROM {ENCOUNTERS_TABLE} {where_sql}
-        GROUP BY hospital, department ORDER BY avg_los DESC
+        top_positions_query = f"""
+        SELECT position_name, sector, geography,
+               ROUND(AVG(pct_nav), 2) as avg_pct_nav,
+               ROUND(SUM(market_value), 2) as total_market_value
+        FROM {HOLDINGS_TABLE} {where_sql}
+        GROUP BY position_name, sector, geography
+        ORDER BY avg_pct_nav DESC LIMIT 15
         """
-        by_dept = _execute_query(dept_query)
+        top_positions = _execute_query(top_positions_query)
 
-        # LOS by discharge day of week
-        dow_query = f"""
-        SELECT discharge_day_of_week, ROUND(AVG(los_days), 1) as avg_los,
-               COUNT(*) as encounter_count
-        FROM {ENCOUNTERS_TABLE} {where_sql}
-        GROUP BY discharge_day_of_week ORDER BY avg_los DESC
+        sector_query = f"""
+        SELECT sector, ROUND(SUM(market_value), 2) as total_mv,
+               ROUND(AVG(pct_nav), 2) as avg_pct_nav, COUNT(DISTINCT position_name) as position_count
+        FROM {HOLDINGS_TABLE} {where_sql}
+        GROUP BY sector ORDER BY total_mv DESC
         """
-        by_dow = _execute_query(dow_query)
+        by_sector = _execute_query(sector_query)
 
-        # LOS by payer
-        payer_query = f"""
-        SELECT payer, ROUND(AVG(los_days), 1) as avg_los, COUNT(*) as encounter_count
-        FROM {ENCOUNTERS_TABLE} {where_sql}
-        GROUP BY payer ORDER BY avg_los DESC
+        geo_query = f"""
+        SELECT geography, ROUND(SUM(market_value), 2) as total_mv,
+               ROUND(AVG(pct_nav), 2) as avg_pct_nav
+        FROM {HOLDINGS_TABLE} {where_sql}
+        GROUP BY geography ORDER BY total_mv DESC
         """
-        by_payer = _execute_query(payer_query)
+        by_geo = _execute_query(geo_query)
 
         return json.dumps({
-            "by_department": by_dept.get("rows", []),
-            "by_discharge_day": by_dow.get("rows", []),
-            "by_payer": by_payer.get("rows", []),
-            "hospital_filter": hospital
+            "top_positions": top_positions.get("rows", []),
+            "by_sector": by_sector.get("rows", []),
+            "by_geography": by_geo.get("rows", []),
+            "fund_filter": fund_id
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 @tool
-def check_ed_performance(hospital: Optional[str] = None) -> str:
-    """Check Emergency Department performance metrics.
+def check_fund_flows(fund_id: Optional[str] = None) -> str:
+    """Check fund capital call/distribution activity and liquidity.
 
     Analyzes:
-    - Wait times by acuity level
-    - Threshold breaches (>60 min for acuity 3-5, >15 min for acuity 1-2)
-    - Trends over time
-    - Hospital comparison
+    - Capital calls vs distributions by fund
+    - Net flow trends
+    - Commitment remaining / unfunded exposure
+    - Liquidity terms distribution
     """
     try:
-        _validate_identifier(hospital, "hospital")
-        where_sql = f"WHERE hospital = '{hospital}'" if hospital else ""
+        _validate_identifier(fund_id, "fund_id")
+        where_sql = f"WHERE fl.fund_id = '{fund_id}'" if fund_id else ""
 
-        # Wait times by acuity
-        acuity_query = f"""
-        SELECT acuity_level, ROUND(AVG(wait_minutes), 1) as avg_wait,
-               ROUND(PERCENTILE_APPROX(wait_minutes, 0.9), 1) as p90_wait,
-               COUNT(*) as visit_count,
-               SUM(CASE WHEN (acuity_level <= 2 AND wait_minutes > 15)
-                        OR (acuity_level > 2 AND wait_minutes > 60) THEN 1 ELSE 0 END) as threshold_breaches
-        FROM {ED_WAIT_TABLE} {where_sql}
-        GROUP BY acuity_level ORDER BY acuity_level
+        flow_summary = f"""
+        SELECT f.fund_name, f.strategy,
+               ROUND(SUM(fl.capital_calls), 2) as total_calls,
+               ROUND(SUM(fl.distributions), 2) as total_distributions,
+               ROUND(SUM(fl.net_flow), 2) as total_net_flow,
+               ROUND(AVG(fl.commitment_remaining), 2) as avg_commitment_remaining
+        FROM {FLOWS_TABLE} fl JOIN {FUNDS_TABLE} f ON fl.fund_id = f.fund_id
+        {where_sql}
+        GROUP BY f.fund_name, f.strategy
+        ORDER BY total_calls DESC LIMIT 15
         """
-        by_acuity = _execute_query(acuity_query)
+        by_fund = _execute_query(flow_summary)
 
-        # By hospital
-        hospital_query = f"""
-        SELECT hospital, ROUND(AVG(wait_minutes), 1) as avg_wait,
-               COUNT(*) as visit_count
-        FROM {ED_WAIT_TABLE} {where_sql}
-        GROUP BY hospital
+        liquidity_query = f"""
+        SELECT fl.liquidity_terms, COUNT(DISTINCT fl.fund_id) as fund_count,
+               ROUND(SUM(fl.capital_calls), 2) as total_calls
+        FROM {FLOWS_TABLE} fl
+        {"WHERE fl.fund_id = '" + fund_id + "'" if fund_id else ""}
+        GROUP BY fl.liquidity_terms
         """
-        by_hospital = _execute_query(hospital_query)
+        by_liquidity = _execute_query(liquidity_query)
 
         return json.dumps({
-            "by_acuity": by_acuity.get("rows", []),
-            "by_hospital": by_hospital.get("rows", []),
-            "thresholds": {"acuity_1_2": "15 min", "acuity_3_5": "60 min"}
+            "by_fund": by_fund.get("rows", []),
+            "by_liquidity_terms": by_liquidity.get("rows", []),
+            "fund_filter": fund_id
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 @tool
-def check_staffing_efficiency(hospital: Optional[str] = None, department: Optional[str] = None) -> str:
-    """Analyze staffing efficiency and contract labor usage.
+def check_exposure_shifts(strategy: Optional[str] = None) -> str:
+    """Analyze sector and geographic exposure shifts over time.
 
     Examines:
-    - Contract labor percentage by department
-    - Cost comparison: full-time vs contract vs per-diem
-    - Departments with highest contract labor reliance
-    - Trends over time
+    - Sector allocation changes quarter-over-quarter
+    - Geographic allocation changes
+    - Funds with largest position changes
+    - Style drift indicators
     """
     try:
-        _validate_identifier(hospital, "hospital")
-        _validate_identifier(department, "department")
-        where_clauses = []
-        if hospital:
-            where_clauses.append(f"hospital = '{hospital}'")
-        if department:
-            where_clauses.append(f"department = '{department}'")
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        _validate_identifier(strategy, "strategy")
+        join_clause = f"JOIN {FUNDS_TABLE} f ON h.fund_id = f.fund_id" if strategy else ""
+        where_sql = f"WHERE f.strategy = '{strategy}'" if strategy else ""
 
-        # Contract labor % by department
-        dept_query = f"""
-        SELECT hospital, department,
-               ROUND(SUM(CASE WHEN staff_type = 'contract' THEN fte_count ELSE 0 END)
-                     / SUM(fte_count) * 100, 1) as contract_labor_pct,
-               SUM(total_cost) as total_staffing_cost,
-               SUM(CASE WHEN staff_type = 'contract' THEN total_cost ELSE 0 END) as contract_cost
-        FROM {STAFFING_TABLE} {where_sql}
-        GROUP BY hospital, department
-        ORDER BY contract_labor_pct DESC
+        sector_shift = f"""
+        SELECT h.sector, YEAR(h.date) as yr, QUARTER(h.date) as qtr,
+               ROUND(AVG(h.pct_nav), 2) as avg_allocation_pct,
+               ROUND(SUM(h.market_value), 2) as total_mv
+        FROM {HOLDINGS_TABLE} h {join_clause}
+        {where_sql}
+        GROUP BY h.sector, YEAR(h.date), QUARTER(h.date)
+        ORDER BY yr DESC, qtr DESC, total_mv DESC
         """
-        by_dept = _execute_query(dept_query)
+        by_sector = _execute_query(sector_shift)
 
-        # Cost by staff type
-        type_query = f"""
-        SELECT staff_type, ROUND(AVG(cost_per_fte), 2) as avg_cost_per_fte,
-               SUM(total_cost) as total_cost, SUM(fte_count) as total_fte
-        FROM {STAFFING_TABLE} {where_sql}
-        GROUP BY staff_type
+        geo_shift = f"""
+        SELECT h.geography, YEAR(h.date) as yr, QUARTER(h.date) as qtr,
+               ROUND(AVG(h.pct_nav), 2) as avg_allocation_pct
+        FROM {HOLDINGS_TABLE} h {join_clause}
+        {where_sql}
+        GROUP BY h.geography, YEAR(h.date), QUARTER(h.date)
+        ORDER BY yr DESC, qtr DESC
         """
-        by_type = _execute_query(type_query)
+        by_geo = _execute_query(geo_shift)
 
         return json.dumps({
-            "by_department": by_dept.get("rows", []),
-            "by_staff_type": by_type.get("rows", []),
-            "filters": {"hospital": hospital, "department": department}
+            "sector_shifts": by_sector.get("rows", []),
+            "geo_shifts": by_geo.get("rows", []),
+            "strategy_filter": strategy
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 @tool
-def check_operational_kpis() -> str:
-    """Check operational KPIs against performance thresholds.
+def check_portfolio_kpis() -> str:
+    """Check portfolio KPIs against performance thresholds.
 
     Monitors:
-    - avg_los (threshold: 5.0 days)
-    - avg_ed_wait_minutes (threshold: 60 min)
-    - bed_utilization_pct (threshold: 85%)
-    - contract_labor_pct (threshold: 25%)
-    - readmission_rate (threshold: 10%)
+    - weighted_avg_return vs benchmark (target: positive spread)
+    - concentration_top5_pct (threshold: 40%)
+    - total_aum trends
+    - manager_count by segment
     """
     try:
         query = f"""
-        SELECT date, hospital, department, avg_los, avg_ed_wait_minutes,
-               bed_utilization_pct, contract_labor_pct, drug_cost_per_encounter, readmission_rate
+        SELECT date, portfolio_segment, total_aum, weighted_avg_return,
+               concentration_top5_pct, benchmark_spread, manager_count
         FROM {KPI_TABLE}
         ORDER BY date DESC LIMIT 50
         """
@@ -351,29 +344,27 @@ def check_operational_kpis() -> str:
         alerts = []
         latest = rows[0]
 
-        los = float(latest.get("avg_los", 0) or 0)
-        if los > 5.0:
-            alerts.append({"metric": "avg_los", "value": los, "threshold": 5.0, "status": "breach"})
-        elif los > 4.5:
-            alerts.append({"metric": "avg_los", "value": los, "threshold": 5.0, "status": "warning"})
+        conc = float(latest.get("concentration_top5_pct", 0) or 0)
+        if conc > 40:
+            alerts.append({"metric": "concentration_top5_pct", "value": conc, "threshold": 40, "status": "breach"})
+        elif conc > 35:
+            alerts.append({"metric": "concentration_top5_pct", "value": conc, "threshold": 40, "status": "warning"})
 
-        ed_wait = float(latest.get("avg_ed_wait_minutes", 0) or 0)
-        if ed_wait > 60:
-            alerts.append({"metric": "ed_wait_minutes", "value": ed_wait, "threshold": 60, "status": "breach"})
+        spread = float(latest.get("benchmark_spread", 0) or 0)
+        if spread < -0.01:
+            alerts.append({"metric": "benchmark_spread", "value": round(spread * 100, 2), "threshold": 0, "status": "breach"})
+        elif spread < 0:
+            alerts.append({"metric": "benchmark_spread", "value": round(spread * 100, 2), "threshold": 0, "status": "warning"})
 
-        contract = float(latest.get("contract_labor_pct", 0) or 0)
-        if contract > 25:
-            alerts.append({"metric": "contract_labor_pct", "value": contract, "threshold": 25, "status": "breach"})
-
-        readmit = float(latest.get("readmission_rate", 0) or 0)
-        if readmit > 10:
-            alerts.append({"metric": "readmission_rate", "value": readmit, "threshold": 10, "status": "breach"})
+        wav_ret = float(latest.get("weighted_avg_return", 0) or 0)
 
         return json.dumps({
             "latest_date": latest.get("date"),
             "metrics": {
-                "avg_los": los, "avg_ed_wait_minutes": ed_wait,
-                "contract_labor_pct": contract, "readmission_rate": readmit,
+                "weighted_avg_return_pct": round(wav_ret * 100, 3),
+                "concentration_top5_pct": conc,
+                "benchmark_spread_pct": round(spread * 100, 3),
+                "total_aum": latest.get("total_aum"),
             },
             "alerts": alerts,
             "overall_status": "breach" if any(a["status"] == "breach" for a in alerts) else "warning" if alerts else "compliant"
@@ -389,8 +380,8 @@ def write_analysis(
 ) -> str:
     """Write analysis results to the analysis_outputs table.
 
-    Analysis types: cost_monitoring, los_analysis, ed_performance, staffing_analysis,
-    next_best_action_report, compliance_monitoring, strategy_optimization, learning_reflection
+    Analysis types: performance_monitoring, concentration_analysis, flow_analysis,
+    exposure_analysis, investment_action_report, portfolio_readiness, policy_compliance
 
     Priority levels: critical, high, medium, low
     """
@@ -398,7 +389,6 @@ def write_analysis(
         record_id = str(uuid.uuid4())
         created_at = datetime.utcnow()
 
-        # Try Lakebase first
         lakebase_success = False
         try:
             from src.db import session_scope
@@ -447,16 +437,16 @@ def write_analysis(
 
 
 @tool
-def search_sops(query: str, num_results: int = 3) -> str:
-    """Search Standard Operating Procedures and hospital policies for guidance.
+def search_investment_policies(query: str, num_results: int = 3) -> str:
+    """Search investment policies, IPS guidelines, and compliance procedures.
 
     Use this when:
-    - Asked about "next best action" or recommended procedures
-    - Need guidance on handling operational issues (high LOS, staffing, ED flow)
-    - Looking for regulatory compliance or accreditation procedures
-    - Need step-by-step protocols for hospital operations
+    - Asked about investment policy or allocation guidelines
+    - Need guidance on due diligence, liquidity, or compliance procedures
+    - Looking for concentration limits, rebalancing triggers, or watchlist criteria
+    - Need step-by-step protocols for investment operations
     """
-    logger.info(f"search_sops called with query: {query}")
+    logger.info(f"search_investment_policies called with query: {query}")
     num_results = min(max(num_results, 1), 10)
     try:
         from databricks.vector_search.client import VectorSearchClient
@@ -478,12 +468,12 @@ def search_sops(query: str, num_results: int = 3) -> str:
                     "section": row[4] if len(row) > 4 else None,
                 })
         if not matches:
-            return json.dumps({"matches": [], "query": query, "message": "No SOP documents found. The SOP vector index may not be set up yet."})
+            return json.dumps({"matches": [], "query": query, "message": "No policy documents found. The investment policy vector index may not be set up yet."})
         return json.dumps({"matches": matches, "query": query})
     except Exception as e:
         error_msg = str(e)
         if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
-            return json.dumps({"error": "SOP vector index not available. Please run the SOP setup notebook.", "query": query})
+            return json.dumps({"error": "Investment policy vector index not available. Please run the policy setup notebook.", "query": query})
         return json.dumps({"error": error_msg, "query": query})
 
 
@@ -492,10 +482,10 @@ def check_data_freshness() -> str:
     """Check if data pipelines are current by examining latest timestamps in key tables."""
     try:
         tables_to_check = [
-            {"table": ENCOUNTERS_TABLE, "ts_col": "admit_date", "name": "Encounter Data"},
-            {"table": DRUG_COSTS_TABLE, "ts_col": "date", "name": "Drug Costs"},
-            {"table": STAFFING_TABLE, "ts_col": "date", "name": "Staffing Data"},
-            {"table": KPI_TABLE, "ts_col": "date", "name": "Operational KPIs"},
+            {"table": FUNDS_TABLE, "ts_col": "inception_date", "name": "Fund Data"},
+            {"table": PERFORMANCE_TABLE, "ts_col": "date", "name": "Performance Data"},
+            {"table": FLOWS_TABLE, "ts_col": "date", "name": "Flow Data"},
+            {"table": KPI_TABLE, "ts_col": "date", "name": "Portfolio KPIs"},
         ]
         freshness_results = []
         overall_status = "fresh"
@@ -542,13 +532,14 @@ def check_data_freshness() -> str:
 
 
 # Tool collections for different modes
-QUICK_TOOLS = [execute_sql, search_encounters, search_sops, analyze_cost_drivers, check_operational_kpis, check_data_freshness]
-DEEP_TOOLS = [execute_sql, search_encounters, search_sops, analyze_cost_drivers, analyze_los_factors,
-              check_ed_performance, check_staffing_efficiency, check_operational_kpis, check_data_freshness, write_analysis]
+QUICK_TOOLS = [execute_sql, search_fund_documents, search_investment_policies, analyze_performance_drivers, check_portfolio_kpis, check_data_freshness]
+DEEP_TOOLS = [execute_sql, search_fund_documents, search_investment_policies, analyze_performance_drivers, analyze_concentration,
+              check_fund_flows, check_exposure_shifts, check_portfolio_kpis, check_data_freshness, write_analysis]
 ALL_TOOLS = {
-    "execute_sql": execute_sql, "search_encounters": search_encounters, "search_sops": search_sops,
-    "analyze_cost_drivers": analyze_cost_drivers, "analyze_los_factors": analyze_los_factors,
-    "check_ed_performance": check_ed_performance, "check_staffing_efficiency": check_staffing_efficiency,
-    "check_operational_kpis": check_operational_kpis, "check_data_freshness": check_data_freshness,
+    "execute_sql": execute_sql, "search_fund_documents": search_fund_documents,
+    "search_investment_policies": search_investment_policies,
+    "analyze_performance_drivers": analyze_performance_drivers, "analyze_concentration": analyze_concentration,
+    "check_fund_flows": check_fund_flows, "check_exposure_shifts": check_exposure_shifts,
+    "check_portfolio_kpis": check_portfolio_kpis, "check_data_freshness": check_data_freshness,
     "write_analysis": write_analysis,
 }

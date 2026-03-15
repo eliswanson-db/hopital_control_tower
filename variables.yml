@@ -13,7 +13,7 @@ variables:
     default: ""
   schema:
     description: "Schema name"
-    default: "med_logistics_nba"
+    default: "investment_intel"
   warehouse_id:
     description: "SQL Warehouse ID"
     default: ""

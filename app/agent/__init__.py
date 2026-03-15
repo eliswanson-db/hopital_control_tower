@@ -1,4 +1,4 @@
-"""Agent module for Hospital Control Tower."""
+"""Agent module for Investment Intelligence Platform."""
 from .graph import invoke_agent, get_llm
 from .autonomous import (
     get_autonomous,
@@ -9,12 +9,12 @@ from .autonomous import (
 )
 from .tools import (
     execute_sql,
-    search_encounters,
-    analyze_cost_drivers,
-    analyze_los_factors,
-    check_ed_performance,
-    check_staffing_efficiency,
-    check_operational_kpis,
+    search_fund_documents,
+    analyze_performance_drivers,
+    analyze_concentration,
+    check_fund_flows,
+    check_exposure_shifts,
+    check_portfolio_kpis,
     write_analysis,
     ALL_TOOLS,
     QUICK_TOOLS,
@@ -30,12 +30,12 @@ __all__ = [
     "CAPABILITIES",
     "AutonomousScheduler",
     "execute_sql",
-    "search_encounters",
-    "analyze_cost_drivers",
-    "analyze_los_factors",
-    "check_ed_performance",
-    "check_staffing_efficiency",
-    "check_operational_kpis",
+    "search_fund_documents",
+    "analyze_performance_drivers",
+    "analyze_concentration",
+    "check_fund_flows",
+    "check_exposure_shifts",
+    "check_portfolio_kpis",
     "write_analysis",
     "ALL_TOOLS",
     "QUICK_TOOLS",

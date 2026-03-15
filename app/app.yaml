@@ -12,10 +12,10 @@ env:
     value: "eswanson_demo"
 
   - name: SCHEMA
-    value: "med_logistics_nba"
+    value: "investment_intel"
 
   - name: VECTOR_SEARCH_ENDPOINT
-    value: "eswanson_demo_med_logistics_nba_vector_endpoint"
+    value: "eswanson_demo_investment_intel_vector_endpoint"
 
   - name: LLM_MODEL_ORCHESTRATOR
     value: "databricks-gpt-oss-120b"
@@ -30,4 +30,4 @@ env:
     value: "false"
 
   - name: MLFLOW_EXPERIMENT
-    value: "/Shared/hospital-control-tower-agent"
+    value: "/Shared/investment-intelligence-agent"
